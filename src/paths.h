@@ -2,7 +2,7 @@
 #define PATHS_H
 #include <stddef.h>
 
-typedef struct { char label[300]; char path[1024]; } Entry;
+typedef struct { char label[400]; char path[1024]; } Entry;
 typedef struct { Entry *e; int n; } List;
 
 const char *data_dir(void);            /* ~/.local/share/aimless */

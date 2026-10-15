@@ -103,7 +103,7 @@ static void scan_songs_root(List *l, const char *root) {
             char p[2200]; snprintf(p, sizeof p, "%s/%s", sub, f->d_name);
             Beatmap bm;
             if (beatmap_load(&bm, p, 1)) { beatmap_free(&bm); continue; }
-            char label[300];
+            char label[400];
             snprintf(label, sizeof label, "%s - %s [%s]", bm.artist, bm.title, bm.version);
             add(l, label, p);
             beatmap_free(&bm);
