@@ -1,0 +1,9 @@
+aimless
+*.o
+.cache/
+skins/*
+!skins/README.md
+*.osz
+*.osu
+*.mp3
+*.ogg
