@@ -1,0 +1,20 @@
+# Maintainer: you <you@example.com>
+pkgname=aimless-git
+pkgver=0
+pkgrel=1
+pkgdesc='Tiny osu!-style fan game with soft silent aim and osu!stable skin support (vibe-coded)'
+arch=('x86_64')
+url='https://github.com/YOURUSER/aimless'
+license=('MIT')
+depends=('sdl2' 'sdl2_image' 'sdl2_mixer' 'sdl2_ttf' 'unzip' 'fontconfig')
+makedepends=('git')
+source=("git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() { cd aimless; git describe --long --tags 2>/dev/null | sed 's/^v//;s/-/.r/;s/-/./' || echo "0.r$(git rev-list --count HEAD)"; }
+build()  { cd aimless; make; }
+package() {
+  cd aimless
+  make DESTDIR="$pkgdir" PREFIX=/usr install
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,0 +1,47 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git sdl2 sdl2_image sdl2_mixer sdl2_ttf unzip fontconfig
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make CFLAGS="-O2 -Wall"
+      - name: Package
+        run: |
+          VER="${GITHUB_REF_NAME:-dev}"
+          strip aimless
+          mkdir -p "aimless-$VER-x86_64-arch"
+          cp aimless README.md LICENSE "aimless-$VER-x86_64-arch/"
+          tar czf "aimless-$VER-x86_64-arch.tar.gz" "aimless-$VER-x86_64-arch"
+          sha256sum "aimless-$VER-x86_64-arch.tar.gz" > "aimless-$VER-x86_64-arch.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aimless-arch
+          path: aimless-*.tar.gz*
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aimless-arch
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: aimless-*.tar.gz*
+          generate_release_notes: true
+          body: |
+            Vibe-coded fan project, not affiliated with osu! / ppy. Built on Arch Linux (x86_64).
+            Install runtime deps: `sudo pacman -S sdl2 sdl2_image sdl2_mixer sdl2_ttf unzip fontconfig`

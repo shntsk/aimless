@@ -1,9 +1,16 @@
 name: build
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
 jobs:
-  build:
+  arch:
     runs-on: ubuntu-latest
+    container: archlinux:latest
     steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git sdl2 sdl2_image sdl2_mixer sdl2_ttf unzip fontconfig
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev
       - run: make
+      - run: ./aimless 2>&1 | head -1 || true

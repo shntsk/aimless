@@ -10,33 +10,40 @@ Loads **osu! stable skins** (hitcircle, overlay, approach circle, cursor, number
 
 > ## Disclaimer
 > aimless is an unofficial fan project. It is **not affiliated with or endorsed by ppy Pty Ltd or osu!**.
-> It contains **no osu! code or assets**. Skins are loaded from your own files; do not redistribute skins you don't have rights to.
+> It contains **no osu! code or assets**. The "osu!" name and branding belong to ppy; this project only uses it to say what it is inspired by. Skins are loaded from your own files; do not redistribute skins you don't have rights to.
 > Silent aim is meant for **offline, casual play**. There is no online play, ranking, or score submission, and there never will be.
 
 ## Features
-- Circle gameplay with approach circles, AR/CS/OD from the `.osu` file, 300/100/50/miss
-- Silent aim (default) or normal aiming with `--no-silent`
-- Uncapped FPS by default (`--vsync` to cap), FPS shown in the window title
-- Stable skin support (`@2x` preferred), `skin.ini` combo colours, procedural fallback if no skin is given
+- Song select screen, **drag & drop `.osz` (songs), `.osk` (skins) or folders** onto the window to import
+- Stable skin support: hitcircle, overlay, approach circle, cursor, numbers, HUD digits, hit judgements, `skin.ini` combo colours (`@2x` preferred, procedural fallback)
+- **Hitsounds**: `normal/soft/drum` x `hitnormal/hitwhistle/hitfinish/hitclap` from the beatmap folder, then the skin, then generated sounds; sample sets and volume come from the timing points
+- Soft silent aim by default (click within 2.5 circle radii still hits, cursor drawn where the mouse really is). `Tab` in the menu cycles soft / anywhere / off
+- Input judged at the real event timestamp, not at the next frame
+- Uncapped FPS by default (`--vsync` to cap), FPS in the window title
 
 ## Not implemented yet
-Sliders (treated as circles on the head only), spinners (skipped), mods, song select, replays, storyboards, hitsounds.
+Sliders (head only, treated as circles), spinners (skipped), mods, results screen, Vulkan renderer.
 
-## Build (Arch Linux)
+## Install
+Grab `aimless-*-x86_64-arch.tar.gz` from [Releases](../../releases) or build it yourself:
 ```sh
-sudo pacman -S --needed base-devel sdl2 sdl2_image sdl2_mixer
-make
+sudo pacman -S --needed base-devel sdl2 sdl2_image sdl2_mixer sdl2_ttf unzip fontconfig
+make && sudo make install     # or: ./aimless
 ```
+A `packaging/PKGBUILD` is included for `makepkg -si`.
 
-## Run
+## Use
 ```sh
-./aimless path/to/map.osu [path/to/skin] [--no-silent] [--assist=N] [--vsync]
+aimless                              # song select
+aimless import pack.osz MySkin.osk   # import from the terminal
+aimless map.osu [skin_dir]           # play a map directly
 ```
-`--assist=N` sets how far from a circle (in circle radii) a click still counts: default `2.5` (subtle correction), `0` = anywhere, `--no-silent` = `1` (no assist).
-Keys: `Z` / `X` / mouse buttons to hit, `Esc` to quit.
+Flags: `--no-silent`, `--assist=N` (radii; `0` = anywhere, `1` = normal), `--vsync`, `--songs=DIR`, `--skins=DIR`
+(point those at your osu!stable `Songs`/`Skins` folders to use them without copying).
+Data lives in `~/.local/share/aimless/{Songs,Skins}`. Keys: `Z`/`X`/mouse to hit, `Esc` back/quit.
 
-Stable skins usually live in `.../osu!/Skins/<name>/` (for example `~/.local/share/osu-wine/osu!/Skins/` with osu-winello).
-Audio: `.mp3`, `.ogg` and `.wav` work through SDL2_mixer.
+## Releases
+Push a tag like `v0.1.0` and the `release` workflow builds on Arch Linux and attaches `aimless-v0.1.0-x86_64-arch.tar.gz` (+ sha256) to a GitHub Release.
 
 ## Performance notes
 Plain SDL2 renderer, no per-frame allocations, only the objects on screen are drawn, no shaders or post-processing.
@@ -44,9 +51,13 @@ If the FPS is low on an iGPU, run with `SDL_RENDER_DRIVER=opengl` or `SDL_RENDER
 
 ## Layout
 ```
-src/main.c      game loop, input, judgement, rendering, HUD
-src/beatmap.c   .osu parser
+src/main.c      startup, flags
+src/game.c      gameplay loop, input, judgement, rendering, HUD
+src/ui.c        song/skin select screen (SDL_ttf)
+src/paths.c     data dirs, import (.osz/.osk), library scan
+src/beatmap.c   .osu parser (metadata, timing points, hit objects)
 src/skin.c      stable skin loader + fallbacks
+src/audio.c     hitsounds
 ```
 
 ## Contributing
