@@ -19,7 +19,27 @@ Loads **osu! stable skins** (hitcircle, overlay, approach circle, cursor, number
 - **Hitsounds**: `normal/soft/drum` x `hitnormal/hitwhistle/hitfinish/hitclap` from the beatmap folder, then the skin, then generated sounds; sample sets and volume come from the timing points
 - Soft silent aim by default (click within 2.5 circle radii still hits, cursor drawn where the mouse really is). `Tab` in the menu cycles soft / anywhere / off
 - Input judged at the real event timestamp, not at the next frame
-- Uncapped FPS by default (`--vsync` to cap), FPS in the window title
+- Uncapped FPS by default; frame limiter, FPS counter and input delay readout in the HUD
+
+## Settings
+Open **Settings** in the song select (or press `F2`). Everything is saved automatically to `~/.local/share/aimless/settings.ini`
+(hand-editable). The UI is drawn in an iOS-style dark look; type in the song list to search, drop `.osz`/`.osk` to import.
+
+| Group | Options |
+|---|---|
+| Audio | master, music and effect (hitsound) volume |
+| Gameplay | background dim, background blur, show background, cursor size, cursor trail, hit lighting, playfield border (none / corners / full), silent aim (off / soft / anywhere, soft radius), input delay compensation (-100..100 ms) |
+| Interface | show score, accuracy, combo, hit error meter, FPS counter, input delay |
+| Display | frame limiter (VSync / 60 / 120 / 240 / 480 / unlimited), fullscreen |
+
+**Input delay**: with the option on, the HUD shows the measured lag between the real input event and the frame that handled it,
+plus your compensation. Hits are judged at the event timestamp, so frame rate does not add delay.
+
+### Compared with osu!lazer (osu!standard)
+Lazer's global gameplay options (background dim/blur, hit lighting, cursor size, FPS counter) and its osu! ruleset options
+(cursor trail, playfield border) have an equivalent here. Not here yet: snaking in/out sliders (needs slider support first),
+cursor ripples, replay analysis options, key overlay, beatmap-specific offset, hitsound/skin source toggles.
+Lazer's own list is the reference; this project copies none of its code or assets.
 
 ## Not implemented yet
 Sliders (head only, treated as circles), spinners (skipped), mods, results screen, Vulkan renderer.
@@ -58,6 +78,8 @@ src/paths.c     data dirs, import (.osz/.osk), library scan
 src/beatmap.c   .osu parser (metadata, timing points, hit objects)
 src/skin.c      stable skin loader + fallbacks
 src/audio.c     hitsounds
+src/settings.c  settings.ini load/save
+src/font.c      TTF helpers + cached text
 ```
 
 ## Contributing
