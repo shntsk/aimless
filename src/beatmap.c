@@ -40,7 +40,8 @@ int beatmap_load(Beatmap *b, const char *path, int meta_only) {
         if (line[0] == '[') {
             sec = !strcmp(line, "[General]") ? 1 : !strcmp(line, "[Difficulty]") ? 2 :
                   !strcmp(line, "[HitObjects]") ? 3 : !strcmp(line, "[Metadata]") ? 4 :
-                  !strcmp(line, "[TimingPoints]") ? 5 : 0;
+                  !strcmp(line, "[TimingPoints]") ? 5 :
+                  !strcmp(line, "[Events]") ? 6 : 0;
             if (sec == 3 && meta_only) break;
             continue;
         }
@@ -55,6 +56,18 @@ int beatmap_load(Beatmap *b, const char *path, int meta_only) {
             if (!strncmp(line, "Title:", 6)) copy_val(b->title, sizeof b->title, line + 6);
             else if (!strncmp(line, "Artist:", 7)) copy_val(b->artist, sizeof b->artist, line + 7);
             else if (!strncmp(line, "Version:", 8)) copy_val(b->version, sizeof b->version, line + 8);
+        } else if (sec == 6) {
+            /* background: 0,0,"file.jpg",x,y (videos start with 1 or "Video") */
+            if (!b->bg[0] && line[0] == '0' && line[1] == ',') {
+                const char *q = strchr(line, '"');
+                if (q) {
+                    const char *e = strchr(q + 1, '"');
+                    if (e) {
+                        snprintf(b->bg, sizeof b->bg, "%.*s", (int)(e - q - 1 > 255 ? 255 : e - q - 1), q + 1);
+                        for (char *c = b->bg; *c; c++) if (*c == '\\') *c = '/';
+                    }
+                }
+            }
         } else if (sec == 5 && line[0] && !meta_only) {
             float t; int set = 0, idx = 0, vol = 100;
             if (sscanf(line, "%f,%*f,%*d,%d,%d,%d", &t, &set, &idx, &vol) < 2) continue;

@@ -20,6 +20,7 @@ typedef struct {
     char path[1024];
     char dir[512];
     char audio[256];
+    char bg[256];       /* background image file from [Events], may be empty */
     char title[128], artist[128], version[128];
     int default_set;
     float cs, ar, od;

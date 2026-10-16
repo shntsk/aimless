@@ -89,3 +89,22 @@ void skin_free(Skin *s) {
     for (int i = 0; i < 10; i++) { if (s->digit[i].t) SDL_DestroyTexture(s->digit[i].t); if (s->score[i].t) SDL_DestroyTexture(s->score[i].t); }
     for (int i = 0; i < 4; i++) if (s->hit[i].t) SDL_DestroyTexture(s->hit[i].t);
 }
+
+void skin_fallback_digits(Skin *s, SDL_Renderer *r, TTF_Font *f) {
+    if (!f) return;
+    for (int i = 0; i < 10; i++) {
+        char d[2] = { (char)('0' + i), 0 };
+        for (int k = 0; k < 2; k++) {
+            Tex *t = k ? &s->score[i] : &s->digit[i];
+            if (t->t) continue;
+            SDL_Color w = { 255, 255, 255, 255 };
+            SDL_Surface *su = TTF_RenderUTF8_Blended(f, d, w);
+            if (!su) continue;
+            t->t = SDL_CreateTextureFromSurface(r, su);
+            t->w = su->w * (k ? 1 : 1); t->h = su->h;
+            SDL_SetTextureBlendMode(t->t, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(t->t, SDL_ScaleModeLinear);
+            SDL_FreeSurface(su);
+        }
+    }
+}
