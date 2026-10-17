@@ -117,7 +117,7 @@ void scan_songs(List *l, const char *extra) {
     char r[600]; songs_dir(r, sizeof r);
     scan_songs_root(l, r);
     if (extra && *extra) scan_songs_root(l, extra);
-    qsort(l->e, l->n, sizeof(Entry), cmp);
+    if (l->n) qsort(l->e, l->n, sizeof(Entry), cmp);
 }
 
 static void scan_skins_root(List *l, const char *root) {
@@ -136,7 +136,7 @@ void scan_skins(List *l, const char *extra) {
     char r[600]; skins_dir(r, sizeof r);
     scan_skins_root(l, r);
     if (extra && *extra) scan_skins_root(l, extra);
-    qsort(l->e, l->n, sizeof(Entry), cmp);
+    if (l->n) qsort(l->e, l->n, sizeof(Entry), cmp);
 }
 
 void list_free(List *l) { free(l->e); l->e = NULL; l->n = 0; }

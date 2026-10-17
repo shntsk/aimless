@@ -21,8 +21,24 @@ Loads **osu! stable skins** (hitcircle, overlay, approach circle, cursor, number
 - Input judged at the real event timestamp, not at the next frame
 - Uncapped FPS by default; frame limiter, FPS counter and input delay readout in the HUD
 
+## Song select
+Laid out like osu!lazer's carousel: beatmaps are grouped into **sets**, the selected set expands to show its **difficulties**
+(ordered by star rating, with lazer's difficulty colours), and a details panel shows the cover, title, artist, mapper,
+CS/AR/OD/HP, BPM, length and object counts.
+
+- **Search** by just typing: words match title, artist, mapper, difficulty name, source and tags.
+  Filters work too: `stars>5`, `ar>=9.5`, `cs<4`, `od=8`, `hp<5`, `bpm>180`, `length<120` (seconds), e.g. `camellia stars>4`.
+- **Sort**: artist, title, date added, difficulty, length, BPM. **Group**: none, artist, title, difficulty. Both are remembered.
+- The **song preview** plays from the map's `PreviewTime` (needs an mp3/ogg), and the last played map is reselected on start.
+- Keys: `Up`/`Down` sets, `Left`/`Right` difficulties, `Enter` play, `F2` random, `F3` settings, `F5` rescan, `Esc` clears the search / quits.
+  Click a set to select it, click the selected difficulty (or double-click a set) to play.
+- Scanning is cached in `~/.local/share/aimless/library.cache` (keyed by file path, size and mtime), so only new or changed maps are re-read.
+
+**The star rating is an estimate.** It is a simplified strain model on the object heads (sliders and mods are not simulated), used for
+ordering and colours only. It is not osu!'s official calculation and will not match the numbers you see in osu!.
+
 ## Settings
-Open **Settings** in the song select (or press `F2`). Everything is saved automatically to `~/.local/share/aimless/settings.ini`
+Open **Settings** in the song select (or press `F3`). Everything is saved automatically to `~/.local/share/aimless/settings.ini`
 (hand-editable). The UI is drawn in an iOS-style dark look; type in the song list to search, drop `.osz`/`.osk` to import.
 
 | Group | Options |
@@ -41,8 +57,17 @@ Lazer's global gameplay options (background dim/blur, hit lighting, cursor size,
 cursor ripples, replay analysis options, key overlay, beatmap-specific offset, hitsound/skin source toggles.
 Lazer's own list is the reference; this project copies none of its code or assets.
 
+## Hitsounds (lazer-style lookup)
+Per object: `hitSample` normal/addition set -> else timing point set -> else `SampleSet` of the map; volume and custom index the same way.
+Files are looked up as `<set>-hit<normal|whistle|finish|clap>[N]` (N only when > 1, falls back to the unnumbered name), first in the beatmap folder, then the skin. A `hitSample` filename replaces the hitnormal. Slider nodes (head, repeats, tail) use their own edge sounds/sets; ticks play `<set>-slidertick`. Without sample files a synthetic beep is used.
+The game clock is steered toward the music position (SDL_mixer >= 2.6) so hits and hitsounds line up with what you hear.
+
+## Sliders
+Bezier (with red anchors), linear, perfect-circle and catmull(as linear) curves; ticks, repeats and a tail judged by how much you followed (all = 300, half = 100, any = 50). Follow needs a held key/button and the cursor near the ball (silent aim widens that to your assist radius). Skin parts: `sliderb0..9`/`sliderb`, `sliderfollowcircle`, `reversearrow`, `sliderscorepoint`, `sliderendcircle(+overlay)`, `SliderBorder` / `SliderTrackOverride` in skin.ini, with fallbacks.
+`combobreak.{wav,ogg,mp3}` from the skin plays when a combo of 20+ breaks (generated thud otherwise).
+
 ## Not implemented yet
-Sliders (head only, treated as circles), spinners (skipped), mods, results screen, Vulkan renderer.
+Spinners (skipped), `sliderslide` loop sound, mods, results screen, Vulkan renderer.
 
 ## Install
 Grab `aimless-*-x86_64-arch.tar.gz` from [Releases](../../releases) or build it yourself:
@@ -73,8 +98,11 @@ If the FPS is low on an iGPU, run with `SDL_RENDER_DRIVER=opengl` or `SDL_RENDER
 ```
 src/main.c      startup, flags
 src/game.c      gameplay loop, input, judgement, rendering, HUD
-src/ui.c        song/skin select screen (SDL_ttf)
-src/paths.c     data dirs, import (.osz/.osk), library scan
+src/ui.c        song select carousel + settings screen (immediate-mode, iOS style)
+src/library.c   beatmap sets/difficulties, disk cache, sort/group, search filters
+src/mapinfo.c   fast .osu metadata scan + estimated star rating
+src/gfx.c       rounded rects, circles, cached text for the menus
+src/paths.c     data dirs, import (.osz/.osk)
 src/beatmap.c   .osu parser (metadata, timing points, hit objects)
 src/skin.c      stable skin loader + fallbacks
 src/audio.c     hitsounds

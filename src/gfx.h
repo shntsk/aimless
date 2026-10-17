@@ -12,6 +12,7 @@ SDL_Renderer *gfx_ren(void);
 void  gfx_rrect(float x, float y, float w, float h, float r, SDL_Color c);
 void  gfx_circle(float cx, float cy, float r, SDL_Color c);
 void  gfx_round_mask(float x, float y, float w, float h, float r, SDL_Color bg); /* rounds an image's corners */
+void  gfx_star(float cx, float cy, float r, SDL_Color c);
 void  gfx_line_h(float x, float y, float w, SDL_Color c);
 
 enum { A_LEFT, A_CENTER, A_RIGHT };

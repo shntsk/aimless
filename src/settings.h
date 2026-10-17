@@ -23,6 +23,8 @@ typedef struct {
     /* HUD */
     int   show_combo, show_score, show_acc, show_fps, show_input_delay, show_error_bar;
     /* not persisted by the menu, filled by --songs/--skins or settings.ini */
+    int   sort_mode, group_mode; /* song select: SORT_*, GROUP_* */
+    char  last_map[600];    /* last played .osu, reselected on start */
     char  skin[128];        /* selected skin folder name, empty = built-in */
     char  songs_extra[512];
     char  skins_extra[512];

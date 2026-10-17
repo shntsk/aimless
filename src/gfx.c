@@ -64,14 +64,16 @@ void gfx_init(SDL_Renderer *r) {
 }
 
 static void cache_clear(void) {
-    for (int i = 0; i < cache_n; i++) { free(cache[i].key); SDL_DestroyTexture(cache[i].t); }
+    for (int i = 0; i < cache_n; i++) { free(cache[i].key); cache[i].key = NULL; SDL_DestroyTexture(cache[i].t); cache[i].t = NULL; }
     cache_n = 0;
 }
 
 void gfx_quit(void) {
     cache_clear();
-    for (int b = 0; b < 2; b++) for (int i = 0; i < 80; i++) if (fonts[b][i]) TTF_CloseFont(fonts[b][i]);
-    SDL_DestroyTexture(disc); SDL_DestroyTexture(inv);
+    for (int b = 0; b < 2; b++) for (int i = 0; i < 80; i++) if (fonts[b][i]) { TTF_CloseFont(fonts[b][i]); fonts[b][i] = NULL; }
+    if (disc) SDL_DestroyTexture(disc);
+    if (inv) SDL_DestroyTexture(inv);
+    disc = inv = NULL;   /* the menu is entered again after every song: nothing may dangle */
 }
 
 static TTF_Font *font(int size, int bold) {
@@ -175,4 +177,17 @@ void gfx_cover(SDL_Texture *t, int tw, int th, float x, float y, float w, float 
     SDL_Rect src = { (int)((tw - vw) / 2), (int)((th - vh) / 2), (int)vw, (int)vh };
     SDL_FRect dst = { x, y, w, h };
     SDL_RenderCopyF(R, t, &src, &dst);
+}
+
+void gfx_star(float cx, float cy, float r, SDL_Color c) {
+    SDL_Vertex v[12];
+    SDL_Color col = c;
+    v[0].position = (SDL_FPoint){ cx, cy }; v[0].color = col; v[0].tex_coord = (SDL_FPoint){0, 0};
+    for (int i = 0; i < 11; i++) {
+        float a = -(float)M_PI / 2 + i * (float)M_PI / 5, rr = (i & 1) ? r * 0.42f : r;
+        v[i + 1].position = (SDL_FPoint){ cx + cosf(a) * rr, cy + sinf(a) * rr };
+        v[i + 1].color = col; v[i + 1].tex_coord = (SDL_FPoint){0, 0};
+    }
+    int idx[30]; for (int i = 0; i < 10; i++) { idx[i*3] = 0; idx[i*3+1] = i + 1; idx[i*3+2] = i + 2; }
+    SDL_RenderGeometry(R, NULL, v, 12, idx, 30);
 }

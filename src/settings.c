@@ -28,6 +28,8 @@ static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v;
 
 void settings_clamp(Settings *s) {
     s->bg_dim = clampi(s->bg_dim, 0, 100);
+    s->sort_mode = clampi(s->sort_mode, 0, 5);
+    s->group_mode = clampi(s->group_mode, 0, 3);
     s->master_vol = clampi(s->master_vol, 0, 100);
     s->bg_blur = clampi(s->bg_blur, 0, 100);
     s->border = clampi(s->border, 0, 2);
@@ -77,6 +79,9 @@ int settings_load(Settings *s) {
         else if (!strcmp(k, "show_acc")) s->show_acc = atoi(v) != 0;
         else if (!strcmp(k, "show_fps")) s->show_fps = atoi(v) != 0;
         else if (!strcmp(k, "show_input_delay")) s->show_input_delay = atoi(v) != 0;
+        else if (!strcmp(k, "sort_mode")) s->sort_mode = atoi(v);
+        else if (!strcmp(k, "group_mode")) s->group_mode = atoi(v);
+        else if (!strcmp(k, "last_map")) snprintf(s->last_map, sizeof s->last_map, "%s", v);
         else if (!strcmp(k, "skin")) snprintf(s->skin, sizeof s->skin, "%s", v);
         else if (!strcmp(k, "songs_dir")) snprintf(s->songs_extra, sizeof s->songs_extra, "%s", v);
         else if (!strcmp(k, "skins_dir")) snprintf(s->skins_extra, sizeof s->skins_extra, "%s", v);
@@ -112,10 +117,13 @@ void settings_save(const Settings *s) {
         "show_acc = %d\n"
         "show_fps = %d\n"
         "show_input_delay = %d  # measured input lag + compensation on screen\n"
+        "sort_mode = %d         # song select: 0 artist, 1 title, 2 date added, 3 difficulty, 4 length, 5 bpm\n"
+        "group_mode = %d        # 0 none, 1 artist, 2 title, 3 difficulty\n"
+        "last_map = %s\n"
         "skin = %s\n"
         "songs_dir = %s\n"
         "skins_dir = %s\n",
         s->assist, s->input_delay, s->vsync, s->fps_limit, s->fullscreen, s->master_vol, s->bg_blur, s->cursor_trail, s->hit_lighting, s->border, s->show_error_bar, s->bg_dim, s->show_bg, s->cursor_size, s->music_vol, s->sfx_vol,
-        s->show_combo, s->show_score, s->show_acc, s->show_fps, s->show_input_delay, s->skin, s->songs_extra, s->skins_extra);
+        s->show_combo, s->show_score, s->show_acc, s->show_fps, s->show_input_delay, s->sort_mode, s->group_mode, s->last_map, s->skin, s->songs_extra, s->skins_extra);
     fclose(f);
 }

@@ -41,6 +41,25 @@ static Tex gen_circle(SDL_Renderer *r, int size, float ring) {
     return t;
 }
 
+/* small white right-pointing chevron for the reverse arrow fallback */
+static Tex gen_arrow(SDL_Renderer *r) {
+    int n = 64;
+    SDL_Surface *su = SDL_CreateRGBSurfaceWithFormat(0, n, n, 32, SDL_PIXELFORMAT_RGBA32);
+    Uint32 *px = su->pixels;
+    for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) {
+        float dy = fabsf(y + .5f - n / 2.0f), ax = x + .5f;
+        float edge = (ax - 14) * 0.9f;                       /* tip at x~50, arms back to x~14 */
+        int in_arm = ax > 14 && ax < 52 && fabsf(dy - (52 - ax) * 0.8f) < 4.5f;
+        (void)edge;
+        px[y * n + x] = SDL_MapRGBA(su->format, 255, 255, 255, in_arm ? 255 : 0);
+    }
+    Tex t = { SDL_CreateTextureFromSurface(r, su), 96, 96 };
+    SDL_SetTextureBlendMode(t.t, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(t.t, SDL_ScaleModeLinear);
+    SDL_FreeSurface(su);
+    return t;
+}
+
 static void parse_ini(Skin *s, const char *dir) {
     static const Uint8 def[5][3] = {{255,192,0},{0,202,0},{18,124,255},{242,24,57},{200,100,255}};
     char p[1024], line[512];
@@ -49,6 +68,8 @@ static void parse_ini(Skin *s, const char *dir) {
     if (f) {
         while (fgets(line, sizeof line, f)) {
             int i, r, g, b;
+            if (sscanf(line, "SliderBorder : %d , %d , %d", &r, &g, &b) == 3) { s->slider_border[0] = r; s->slider_border[1] = g; s->slider_border[2] = b; }
+            else if (sscanf(line, "SliderTrackOverride : %d , %d , %d", &r, &g, &b) == 3) { s->slider_track[0] = r; s->slider_track[1] = g; s->slider_track[2] = b; s->has_track = 1; }
             if (sscanf(line, "Combo%d : %d , %d , %d", &i, &r, &g, &b) == 4 ||
                 sscanf(line, "Combo%d:%d,%d,%d", &i, &r, &g, &b) == 4) {
                 if (i >= 1 && i <= 8) {
@@ -80,11 +101,33 @@ void skin_load(Skin *s, SDL_Renderer *r, const char *dir) {
     s->score_x = load(r, dir, "score-x");
     s->hit[0] = load(r, dir, "hit300"); s->hit[1] = load(r, dir, "hit100");
     s->hit[2] = load(r, dir, "hit50");  s->hit[3] = load(r, dir, "hit0");
+    memset(s->slider_border, 255, 3);
     parse_ini(s, dir);
+
+    /* sliders */
+    s->disc = gen_circle(r, 128, 0);
+    for (int i = 0; i < 10; i++) {
+        snprintf(n, sizeof n, "sliderb%d", i);
+        Tex t = load(r, dir, n);
+        if (!t.t) break;
+        s->sliderb[s->n_sliderb++] = t;
+    }
+    if (!s->n_sliderb) { Tex t = load(r, dir, "sliderb"); if (t.t) s->sliderb[s->n_sliderb++] = t; }
+    if (!s->n_sliderb) s->sliderb[s->n_sliderb++] = gen_circle(r, 128, 6);
+    s->follow = load(r, dir, "sliderfollowcircle");
+    if (!s->follow.t) { s->follow = gen_circle(r, 128, 3); s->follow.w = s->follow.h = 300; } /* ~2.4 circle diameters */
+    s->arrow = load(r, dir, "reversearrow");
+    if (!s->arrow.t) s->arrow = gen_arrow(r);
+    s->scorepoint = load(r, dir, "sliderscorepoint");
+    if (!s->scorepoint.t) { s->scorepoint = gen_circle(r, 32, 0); s->scorepoint.w = s->scorepoint.h = 16; }
+    s->endcircle = load(r, dir, "sliderendcircle");
+    s->endoverlay = load(r, dir, "sliderendcircleoverlay");
 }
 
 void skin_free(Skin *s) {
-    SDL_Texture *all[] = { s->hitcircle.t, s->overlay.t, s->approach.t, s->cursor.t, s->score_x.t };
+    SDL_Texture *all[] = { s->hitcircle.t, s->overlay.t, s->approach.t, s->cursor.t, s->score_x.t,
+                           s->disc.t, s->follow.t, s->arrow.t, s->scorepoint.t, s->endcircle.t, s->endoverlay.t };
+    for (int i = 0; i < s->n_sliderb; i++) if (s->sliderb[i].t) SDL_DestroyTexture(s->sliderb[i].t);
     for (size_t i = 0; i < sizeof all / sizeof *all; i++) if (all[i]) SDL_DestroyTexture(all[i]);
     for (int i = 0; i < 10; i++) { if (s->digit[i].t) SDL_DestroyTexture(s->digit[i].t); if (s->score[i].t) SDL_DestroyTexture(s->score[i].t); }
     for (int i = 0; i < 4; i++) if (s->hit[i].t) SDL_DestroyTexture(s->hit[i].t);

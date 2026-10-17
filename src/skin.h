@@ -11,6 +11,10 @@ typedef struct {
     Tex score[10];      /* HUD digits (score-N)        */
     Tex score_x;        /* "x" after combo             */
     Tex hit[4];         /* hit300, hit100, hit50, hit0 */
+    Tex disc;           /* plain white disc (slider body stamps), always generated */
+    Tex sliderb[10]; int n_sliderb;  /* ball frames (sliderb0..9 or sliderb) */
+    Tex follow, arrow, scorepoint, endcircle, endoverlay;
+    Uint8 slider_border[3], slider_track[3]; int has_track;  /* skin.ini SliderBorder / SliderTrackOverride */
     Uint8 combo[8][3];
     int n_combo;
 } Skin;

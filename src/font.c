@@ -28,7 +28,7 @@ void font_draw(SDL_Renderer *ren, TTF_Font *f, const char *s, int x, int y, SDL_
 }
 
 void text_set(SDL_Renderer *ren, TextCache *c, TTF_Font *f, const char *s, SDL_Color col) {
-    Uint32 k = (col.r << 24) | (col.g << 16) | (col.b << 8) | col.a;
+    Uint32 k = ((Uint32)col.r << 24) | ((Uint32)col.g << 16) | ((Uint32)col.b << 8) | col.a;
     if (c->t && c->col == k && !strcmp(c->s, s)) return;
     if (c->t) { SDL_DestroyTexture(c->t); c->t = NULL; }
     snprintf(c->s, sizeof c->s, "%s", s); c->col = k;

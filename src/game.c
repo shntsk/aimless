@@ -11,6 +11,7 @@
 #include <string.h>
 
 #define LEADIN 1500.0
+#define AUDIO_LAT_MS 6.0   /* ~half an audio buffer: Mix_GetMusicPosition is the decoded, not the heard, position */
 
 static void draw_tex(SDL_Renderer *ren, Tex *t, float cx, float cy, float w, float h, int alpha) {
     if (!t->t) return;
@@ -61,6 +62,109 @@ static SDL_Texture *blur_texture(SDL_Renderer *ren, SDL_Texture *src, int w, int
     return cur;
 }
 
+
+static void tex_rot(SDL_Renderer *ren, Tex *t, float cx, float cy, float w, float h, double deg, int alpha) {
+    if (!t->t) return;
+    SDL_SetTextureAlphaMod(t->t, alpha);
+    SDL_FRect d = { cx - w / 2, cy - h / 2, w, h };
+    SDL_RenderCopyExF(ren, t->t, NULL, &d, deg, NULL, SDL_FLIP_NONE);
+}
+
+/* centre of the slider at song time t (osu px) */
+static void slider_pos(const Obj *o, double t, float *x, float *y) {
+    double sd = (double)(o->endtime - o->time) / o->slides, u = sd > 0 ? (t - o->time) / sd : 0;
+    if (u < 0) u = 0;
+    if (u > o->slides) u = o->slides;
+    int sl = (int)u; if (sl >= o->slides) sl = o->slides - 1;
+    double f = u - sl; if (sl & 1) f = 1 - f;
+    double di = f * (o->npath - 1); int i0 = (int)di;
+    if (i0 > o->npath - 2) i0 = o->npath - 2;
+    if (i0 < 0) i0 = 0;
+    float fr = (float)(di - i0);
+    *x = o->path[i0*2] + (o->path[i0*2+2] - o->path[i0*2]) * fr;
+    *y = o->path[i0*2+1] + (o->path[i0*2+3] - o->path[i0*2+1]) * fr;
+}
+
+/* body, ticks, end circle, reverse arrows, ball + follow circle, final judgement. The head circle and the
+ * approach circle are drawn by the caller while the head is still pending. */
+static void draw_slider(SDL_Renderer *ren, Skin *sk, Obj *o, double t, float s, float ox, float oy,
+                        float rad, float preempt, int H) {
+    float d = rad * 2 * s * 1.05f;
+    float kk = sk->hitcircle.w ? d / sk->hitcircle.w : 1;       /* skin sprites are authored against hitcircle */
+    if (o->done) { /* judgement flash at the tail, nothing else */
+        float age = (float)(t - o->judge_time);
+        if (age < 400 && age >= 0) {
+            float ex = ox + o->path[(o->npath - 1) * 2] * s, ey = oy + o->path[(o->npath - 1) * 2 + 1] * s;
+            Tex *h = &sk->hit[o->judge == 300 ? 0 : o->judge == 100 ? 1 : o->judge == 50 ? 2 : 3];
+            float us = H / 768.0f;
+            draw_tex(ren, h, ex, ey, h->w * us, h->h * us, 255 - (int)(age / 400 * 255));
+        }
+        return;
+    }
+    float fade = fminf(1, (float)(t - (o->time - preempt)) / fminf(400, preempt));
+    int a = (int)(fade * 255);
+    Uint8 *c = sk->combo[o->color % sk->n_combo];
+    Uint8 trk[3] = { (Uint8)(c[0] * 35 / 100), (Uint8)(c[1] * 35 / 100), (Uint8)(c[2] * 35 / 100) };
+    if (sk->has_track) memcpy(trk, sk->slider_track, 3);
+
+    /* body: stamp discs along the path, border first, then the darker track on top */
+    int stepi = (int)(rad * 0.3f / o->step); if (stepi < 1) stepi = 1;
+    for (int pass = 0; pass < 2; pass++) {
+        const Uint8 *col = pass ? trk : sk->slider_border;
+        float dd = pass ? d * 0.86f : d;
+        /* opaque stamps (overlapping translucent ones band): fade in by scaling the colour instead */
+        SDL_SetTextureColorMod(sk->disc.t, col[0] * a / 255, col[1] * a / 255, col[2] * a / 255);
+        for (int i = 0; ; i += stepi) {
+            if (i > o->npath - 1) i = o->npath - 1;
+            draw_tex(ren, &sk->disc, ox + o->path[i*2] * s, oy + o->path[i*2+1] * s, dd, dd, 255);
+            if (i == o->npath - 1) break;
+        }
+    }
+    SDL_SetTextureColorMod(sk->disc.t, 255, 255, 255);
+
+    /* upcoming ticks */
+    for (int e = o->evi; e < o->nev; e++) if (o->ev[e*2+1] == 0) {
+        float tx, ty; slider_pos(o, o->ev[e*2], &tx, &ty);
+        draw_tex(ren, &sk->scorepoint, ox + tx * s, oy + ty * s, sk->scorepoint.w * kk, sk->scorepoint.h * kk, a);
+    }
+
+    /* end circle */
+    float ex = ox + o->path[(o->npath - 1) * 2] * s, ey = oy + o->path[(o->npath - 1) * 2 + 1] * s;
+    if (sk->endcircle.t) {
+        draw_tex(ren, &sk->endcircle, ex, ey, d, d, a);
+        if (sk->endoverlay.t) draw_tex(ren, &sk->endoverlay, ex, ey, d, d, a);
+        else draw_tex(ren, &sk->overlay, ex, ey, d, d, a);
+    } else {
+        SDL_SetTextureColorMod(sk->hitcircle.t, c[0] * 6 / 10, c[1] * 6 / 10, c[2] * 6 / 10);
+        draw_tex(ren, &sk->hitcircle, ex, ey, d, d, a);
+        draw_tex(ren, &sk->overlay, ex, ey, d, d, a);
+    }
+
+    /* reverse arrows at the next (up to two) turning points */
+    double sd = (double)(o->endtime - o->time) / o->slides;
+    int cur = sd > 0 ? (int)((t - o->time) / sd) : 0;
+    if (cur < 0) cur = 0;
+    for (int n = cur + 1; n <= cur + 2 && n < o->slides; n++) {
+        int at_end = n & 1;
+        int i0 = at_end ? o->npath - 1 : 0, i1 = at_end ? o->npath - 1 - (o->npath > 6 ? 5 : 1) : (o->npath > 6 ? 5 : 1);
+        float px = ox + o->path[i0*2] * s, py = oy + o->path[i0*2+1] * s;
+        double ang = atan2(o->path[i1*2+1] - o->path[i0*2+1], o->path[i1*2] - o->path[i0*2]) * 180.0 / M_PI;
+        float pulse = 1 + 0.08f * sinf((float)t / 120.0f);
+        tex_rot(ren, &sk->arrow, px, py, sk->arrow.w * kk * pulse, sk->arrow.h * kk * pulse, ang, a);
+    }
+
+    /* ball + follow circle */
+    if (t >= o->time && t <= o->endtime) {
+        float bx, by; slider_pos(o, t, &bx, &by); bx = ox + bx * s; by = oy + by * s;
+        float grow = fminf(1, (float)(t - o->time) / 90);
+        float fs = (o->trk ? 1.0f : 0.7f) * (0.5f + 0.5f * grow);
+        draw_tex(ren, &sk->follow, bx, by, sk->follow.w * kk * fs, sk->follow.h * kk * fs, o->trk ? 255 : 130);
+        Tex *bl = &sk->sliderb[((int)(t / 30)) % sk->n_sliderb];
+        SDL_SetTextureColorMod(bl->t, 255, 255, 255);
+        draw_tex(ren, bl, bx, by, bl->w * kk, bl->h * kk, 255);
+    }
+}
+
 typedef struct { float x, y; double t; } Flash;
 #define N_FL 32
 #define N_ERR 40
@@ -87,6 +191,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
     SDL_Color hud_col = { 235, 235, 240, 255 };
     Mix_VolumeMusic((int)(MIX_MAX_VOLUME * st->music_vol / 100.0 * st->master_vol / 100.0));
     sfx_init(skin_dir && *skin_dir ? skin_dir : NULL, bm.dir);
+    sfx_prepare(&bm);
     SDL_RenderSetVSync(ren, st->vsync);
 
     float assist = st->assist;
@@ -95,6 +200,8 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
     float rad = 54.4f - 4.48f * bm.cs;
 
     int first = 0, combo = 0, maxcombo = 0, hits[4] = {0}, running = 1, quit = 0, music_on = 0, W, H;
+    double clk = 0; int sl_first = 0;
+#define BREAK_COMBO() do { if (combo >= 20) sfx_miss(st->sfx_vol * st->master_vol / 100); combo = 0; } while (0)
     double score = 0, fps_t = 0, last_t = 0, pop_t = -1e9, lag_sum = 0; int fps_n = 0, lag_n = 0, lag_last = 0;
     float fps_show = 0;
     Flash fl[N_FL] = {{0}}; int fl_i = 0;
@@ -105,14 +212,31 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
     Uint64 t0 = SDL_GetPerformanceCounter(), freq = SDL_GetPerformanceFrequency();
 
     while (running) {
-        double t = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / freq - LEADIN;
-        if (!music_on && t >= 0 && mus) { Mix_PlayMusic(mus, 1); music_on = 1; }
+        double wall = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / freq - LEADIN;
+        if (!music_on && wall >= 0 && mus) { Mix_PlayMusic(mus, 1); music_on = 1; }
+#if SDL_MIXER_VERSION_ATLEAST(2, 6, 0)
+        /* The game clock is the wall clock, but the music starts late (decoder + device buffer) and
+         * its real speed can differ a little. Slowly steer the clock toward the audio position so
+         * the hit timing and the hitsounds line up with what is actually heard. */
+        if (music_on && Mix_PlayingMusic()) {
+            double p = Mix_GetMusicPosition(mus);
+            if (p >= 0) {
+                double err = p * 1000.0 - AUDIO_LAT_MS - wall;
+                if (fabs(err - clk) > 150) clk = err;              /* seek / first sync */
+                else clk += (err - clk) * 0.03;                    /* low-pass: position updates in buffer-sized steps */
+#ifdef AIMLESS_DEBUG
+                if (getenv("AIMLESS_CLK") && (fps_n % 200) == 0) fprintf(stderr, "wall %.0f pos %.1f err %.1f clk %.1f\n", wall, p * 1000, err, clk);
+#endif
+            }
+        }
+#endif
+        double t = wall + clk;
         SDL_GetWindowSize(win, &W, &H);
         float s = H / 480.0f, ox = (W - 512 * s) / 2, oy = (H - 384 * s) / 2 + 8 * s;
-        int mx, my; SDL_GetMouseState(&mx, &my);
+        int mx, my; Uint32 mbtn = SDL_GetMouseState(&mx, &my);
 
 #ifdef AIMLESS_DEBUG /* test hook: perfect-ish autoplay clicks + screenshot (not in release builds) */
-        if (getenv("AIMLESS_AUTOHIT") && first < bm.n && t >= bm.objs[first].time + ((first * 37) % 60) - 30) {
+        if (getenv("AIMLESS_AUTOHIT") && first < bm.n && !(getenv("AIMLESS_MISS") && first == atoi(getenv("AIMLESS_MISS"))) && t >= bm.objs[first].time + ((first * 37) % 60) - 30) {
             SDL_Event ev; memset(&ev, 0, sizeof ev);
             ev.type = SDL_MOUSEBUTTONDOWN; ev.button.timestamp = SDL_GetTicks(); ev.button.button = SDL_BUTTON_LEFT;
             SDL_PushEvent(&ev);
@@ -139,20 +263,62 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
                 if (diff <= w50 && near) {
                     o->state = 1; o->judge_time = (int)t;
                     o->judge = diff <= w300 ? 300 : diff <= w100 ? 100 : 50;
-                    hits[o->judge == 300 ? 0 : o->judge == 100 ? 1 : 2]++;
-                    score += o->judge * (1 + combo / 25.0);
+                    if (!o->type) hits[o->judge == 300 ? 0 : o->judge == 100 ? 1 : 2]++; /* sliders are judged at their end */
+                    score += (o->type ? 30 : o->judge) * (1 + combo / 25.0);
                     if (++combo > maxcombo) maxcombo = combo;
                     pop_t = t;
                     err_v[err_i % N_ERR] = (float)(te - o->time); err_t[err_i % N_ERR] = t; err_j[err_i % N_ERR] = o->judge; err_i++;
                     if (st->hit_lighting) { fl[fl_i % N_FL] = (Flash){ ox + o->x * s, oy + o->y * s, t }; fl_i++; }
-                    sfx_play(o->hs, o->nset, o->aset, o->vol * st->sfx_vol / 100 * st->master_vol / 100);
+                    if (o->type) sfx_play(o->nhs[0], o->nns[0], o->nas[0], o->idx, o->sfile, o->vol * st->sfx_vol / 100 * st->master_vol / 100);
+                    else sfx_play(o->hs, o->nset, o->aset, o->idx, o->sfile, o->vol * st->sfx_vol / 100 * st->master_vol / 100);
                     first++;
                 }
             }
         }
         while (first < bm.n && t > bm.objs[first].time + w50) {
             Obj *o = &bm.objs[first++];
-            o->state = 2; o->judge = 0; o->judge_time = (int)t; hits[3]++; combo = 0;
+            o->state = 2; o->judge = 0; o->judge_time = (int)t;
+            if (!o->type) hits[3]++;
+            BREAK_COMBO();
+        }
+
+        { /* sliders whose head is resolved: follow, ticks, repeats, tail */
+            const Uint8 *ks = SDL_GetKeyboardState(NULL);
+            int held = (mbtn & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) || ks[SDL_SCANCODE_Z] || ks[SDL_SCANCODE_X];
+#ifdef AIMLESS_DEBUG
+            if (getenv("AIMLESS_AUTOHIT")) held = 1;
+#endif
+            for (int i = sl_first; i < first; i++) {
+                Obj *o = &bm.objs[i];
+                if (!o->type || o->done) continue;
+                float sx, sy; slider_pos(o, t, &sx, &sy);
+                float dist = (float)hypot(mx - (ox + sx * s), my - (oy + sy * s));
+                int in = assist <= 0 || dist <= rad * s * fmaxf(2.4f, assist);
+                o->trk = t >= o->time && held && in;
+                int svol = o->vol * st->sfx_vol / 100 * st->master_vol / 100;
+                while (o->evi < o->nev && o->ev[o->evi * 2] <= t) {
+                    int kind = o->ev[o->evi * 2 + 1];
+                    if (o->trk) {
+                        o->ev_hit++;
+                        if (++combo > maxcombo) maxcombo = combo;
+                        pop_t = t;
+                        score += (kind ? 30 : 10) * (1 + combo / 25.0);
+                        if (kind == 0) sfx_tick(o->nset, o->idx, svol);
+                        else { int n = ++o->ev_node; sfx_play(o->nhs[n], o->nns[n], o->nas[n], o->idx, "", svol); }
+                    } else {
+                        if (kind) o->ev_node++;
+                        BREAK_COMBO();
+                    }
+                    o->evi++;
+                }
+                if (o->evi >= o->nev) { /* judged by how much of the slider was followed, head included */
+                    int tot = o->nev + 1, got = o->ev_hit + (o->state == 1);
+                    o->judge = got == tot ? 300 : got * 2 >= tot ? 100 : got > 0 ? 50 : 0;
+                    hits[o->judge == 300 ? 0 : o->judge == 100 ? 1 : o->judge == 50 ? 2 : 3]++;
+                    o->judge_time = (int)t; o->done = 1; o->trk = 0;
+                }
+            }
+            while (sl_first < first && (!bm.objs[sl_first].type || bm.objs[sl_first].done)) sl_first++;
         }
 
         SDL_SetRenderDrawColor(ren, 12, 12, 16, 255);
@@ -182,10 +348,15 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
 
         int hi = first;
         while (hi < bm.n && bm.objs[hi].time - preempt <= t) hi++;
-        for (int i = hi - 1; i >= 0 && i >= first - 24; i--) {
+        int lo = first - 24; if (sl_first < lo) lo = sl_first; if (lo < 0) lo = 0;
+        for (int i = hi - 1; i >= lo; i--) {
             Obj *o = &bm.objs[i];
             float px = ox + o->x * s, py = oy + o->y * s, d = rad * 2 * s * 1.05f;
-            if (o->state) {
+            if (o->type) {
+                if (o->done && t > o->judge_time + 400) continue;
+                draw_slider(ren, &sk, o, t, s, ox, oy, rad, preempt, H);
+                if (o->state) continue;       /* head already hit or missed: only the body is left */
+            } else if (o->state) {
                 float age = t - o->judge_time;
                 if (age < 400) {
                     Tex *h = &sk.hit[o->judge == 300 ? 0 : o->judge == 100 ? 1 : o->judge == 50 ? 2 : 3];
@@ -297,7 +468,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
 
         fps_n++; fps_t += t - last_t; last_t = t;
         if (fps_t >= 500) { fps_show = (float)(fps_n * 1000.0 / fps_t); fps_n = 0; fps_t = 0; }
-        if (first >= bm.n && t > bm.objs[bm.n - 1].time + 2500) running = 0;
+        if (first >= bm.n && sl_first >= first && t > bm.last_end + 2500) running = 0;
     }
 
     int tot = hits[0] + hits[1] + hits[2] + hits[3];
@@ -306,6 +477,9 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
              (int)score, maxcombo, hits[0], hits[1], hits[2], hits[3], acc);
     printf("%s\n", st->status);
 
+#ifdef AIMLESS_DEBUG
+    if (getenv("AIMLESS_CLK")) fprintf(stderr, "clock offset vs audio: %.1f ms\n", clk);
+#endif
     Mix_HaltMusic();
     sfx_free(); skin_free(&sk); beatmap_free(&bm);
     if (bg) SDL_DestroyTexture(bg);
