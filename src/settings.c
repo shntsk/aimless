@@ -1,6 +1,7 @@
 /* settings.ini: simple `key = value` file in the data dir. Unknown keys are ignored. */
 #include "settings.h"
 #include "paths.h"
+#include "plat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,7 @@ static char *trim(char *s) {
 }
 
 int settings_load(Settings *s) {
-    FILE *f = fopen(settings_path(), "r");
+    FILE *f = plat_fopen(settings_path(), "r");
     if (!f) return 0;
     char line[1100];
     while (fgets(line, sizeof line, f)) {
@@ -92,7 +93,7 @@ int settings_load(Settings *s) {
 }
 
 void settings_save(const Settings *s) {
-    FILE *f = fopen(settings_path(), "w");
+    FILE *f = plat_fopen(settings_path(), "w");
     if (!f) return;
     fprintf(f,
         "# aimless settings (edited by the game, safe to edit by hand)\n"

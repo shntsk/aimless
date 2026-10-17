@@ -1,29 +1,31 @@
 #include "paths.h"
 #include "beatmap.h"
+#include "plat.h"
 #include "skinfs.h"
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
+/* XDG_DATA_HOME/aimless if set (any OS), else ~/.local/share/aimless on Linux and %APPDATA%/aimless on Windows.
+ * Always UTF-8 with '/' separators; computed once. */
 const char *data_dir(void) {
     static char d[512];
     if (d[0]) return d;
-    const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
-    if (x && *x) snprintf(d, sizeof d, "%s/aimless", x);
-    else snprintf(d, sizeof d, "%s/.local/share/aimless", h ? h : ".");
+    char b[480];
+    if (plat_getenv("XDG_DATA_HOME", b, sizeof b)) snprintf(d, sizeof d, "%s/aimless", b);
+#ifdef _WIN32
+    else if (plat_getenv("APPDATA", b, sizeof b)) snprintf(d, sizeof d, "%s/aimless", b);
+    else if (plat_getenv("USERPROFILE", b, sizeof b)) snprintf(d, sizeof d, "%s/AppData/Roaming/aimless", b);
+    else snprintf(d, sizeof d, "./aimless-data");
+    for (char *p = d; *p; p++) if (*p == '\\') *p = '/';
+#else
+    else if (plat_getenv("HOME", b, sizeof b)) snprintf(d, sizeof d, "%s/.local/share/aimless", b);
+    else snprintf(d, sizeof d, "./.local/share/aimless");
+#endif
     return d;
 }
 
-static void mkdir_p(const char *path) {
-    char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", path);
-    for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
-    mkdir(tmp, 0755);
-}
+static void mkdir_p(const char *path) { plat_mkdir_p(path); }
 
 void songs_dir(char *o, size_t n) { snprintf(o, n, "%s/Songs", data_dir()); }
 void skins_dir(char *o, size_t n) { snprintf(o, n, "%s/Skins", data_dir()); }
@@ -34,56 +36,32 @@ void ensure_dirs(void) {
     skins_dir(p, sizeof p); mkdir_p(p);
 }
 
-/* returns the exit status (0..255), or -1 if the process could not be started / was killed */
-static int run_status(char *const argv[]) {
-    pid_t p = fork();
-    if (p < 0) return -1;
-    if (p == 0) { execvp(argv[0], argv); _exit(127); }
-    int st;
-    if (waitpid(p, &st, 0) < 0) return -1;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
-}
-
-static int run(char *const argv[]) { return run_status(argv) == 0 ? 0 : -1; }
-
-/* Extract a zip into dest (created if needed). The archive is only read. Info-ZIP exits with 1 for
- * "completed with warnings" (typical for Windows-made archives with backslash paths), which is not a
- * failure; if unzip is not installed, bsdtar is tried. Both refuse ".." and absolute member paths. */
-static int extract_zip(const char *zip, const char *dest) {
-    mkdir_p(dest);
-    char *u[] = { "unzip", "-qq", "-o", (char *)zip, "-d", (char *)dest, NULL };
-    int rc = run_status(u);
-    if (rc == 0 || rc == 1) return 0;
-    if (rc == 127) { char *t[] = { "bsdtar", "-xf", (char *)zip, "-C", (char *)dest, NULL }; if (run_status(t) == 0) return 0; }
-    return -1;
-}
-
 static int ends_with(const char *s, const char *ext) {
     size_t a = strlen(s), b = strlen(ext);
     return a >= b && !strcasecmp(s + a - b, ext);
 }
 
 static int dir_has_osu(const char *dir) {
-    DIR *d = opendir(dir); if (!d) return 0;
-    struct dirent *e; int found = 0;
-    while ((e = readdir(d))) if (ends_with(e->d_name, ".osu")) { found = 1; break; }
-    closedir(d);
+    PlatDir *d = plat_opendir(dir); if (!d) return 0;
+    const char *e; int found = 0;
+    while ((e = plat_readdir(d))) if (ends_with(e, ".osu")) { found = 1; break; }
+    plat_closedir(d);
     return found;
 }
 
-static void rm_rf(const char *path) { char *a[] = { "rm", "-rf", "--", (char *)path, NULL }; run(a); }
+static void rm_rf(const char *path) { plat_remove_tree(path); }
 
 /* directory (not recursive beyond one wrapper folder) that actually holds the skin files */
 static int find_skin_root(const char *tmp, char *out, size_t n) {
     if (skinfs_looks_like_skin(tmp)) { snprintf(out, n, "%s", tmp); return 1; }
-    DIR *d = opendir(tmp); if (!d) return 0;
-    struct dirent *e; char only[1100] = ""; int dirs = 0;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.' || !strcmp(e->d_name, "__MACOSX")) continue;
-        char p[1100]; snprintf(p, sizeof p, "%s/%s", tmp, e->d_name);
+    PlatDir *d = plat_opendir(tmp); if (!d) return 0;
+    const char *e; char only[1100] = ""; int dirs = 0;
+    while ((e = plat_readdir(d))) {
+        if (e[0] == '.' || !strcmp(e, "__MACOSX")) continue;
+        char p[1100]; snprintf(p, sizeof p, "%s/%s", tmp, e);
         if (skinfs_isdir(p)) { dirs++; snprintf(only, sizeof only, "%s", p); }
     }
-    closedir(d);
+    plat_closedir(d);
     if (dirs == 1 && skinfs_looks_like_skin(only)) { snprintf(out, n, "%s", only); return 1; }
     return 0;
 }
@@ -95,10 +73,10 @@ static int import_osk(const char *src, const char *name, char *msg, size_t n, ch
     char root[600], tmp[700], skin_root[1100], dest[900], clean[256];
     skins_dir(root, sizeof root); mkdir_p(root);
     snprintf(tmp, sizeof tmp, "%s/.import-XXXXXX", root);
-    if (!mkdtemp(tmp)) { snprintf(msg, n, "import failed: cannot write to the skins folder"); return -1; }
-    if (extract_zip(src, tmp)) {
+    if (!plat_mkdtemp(tmp)) { snprintf(msg, n, "import failed: cannot write to the skins folder"); return -1; }
+    if (plat_extract_zip(src, tmp)) {
         rm_rf(tmp);
-        snprintf(msg, n, "import failed: cannot extract .osk (is unzip installed?)");
+        snprintf(msg, n, "import failed: cannot extract .osk (" PLAT_UNZIP_HINT ")");
         return -1;
     }
     if (!find_skin_root(tmp, skin_root, sizeof skin_root)) {
@@ -111,8 +89,8 @@ static int import_osk(const char *src, const char *name, char *msg, size_t n, ch
     if (!clean[0] || clean[0] == '.') { char t[256]; snprintf(t, sizeof t, "%s", clean); snprintf(clean, sizeof clean, "skin_%.240s", t); }
     int k = 1;
     snprintf(dest, sizeof dest, "%s/%s", root, clean);
-    while (!access(dest, F_OK) && k < 100) snprintf(dest, sizeof dest, "%s/%s (%d)", root, clean, ++k);
-    if (k >= 100 || rename(skin_root, dest)) {
+    while (plat_exists(dest) && k < 100) snprintf(dest, sizeof dest, "%s/%s (%d)", root, clean, ++k);
+    if (k >= 100 || plat_rename(skin_root, dest)) {
         rm_rf(tmp);
         snprintf(msg, n, "import failed: cannot install skin");
         return -1;
@@ -125,15 +103,17 @@ static int import_osk(const char *src, const char *name, char *msg, size_t n, ch
 }
 
 int import_path_ex(const char *src, char *msg, size_t n, char *dest_out, size_t dn) {
-    struct stat st;
+    PlatStat st;
     if (dest_out && dn) dest_out[0] = 0;
-    if (stat(src, &st)) { snprintf(msg, n, "import failed: cannot open file"); return -1; }
-    const char *b = strrchr(src, '/'); b = b ? b + 1 : src;
+    if (plat_stat(src, &st)) { snprintf(msg, n, "import failed: cannot open file"); return -1; }
+    /* name = last path component; trailing separators ("dir/", "C:\\maps\\dir\\") are ignored */
+    char trimmed[1100]; snprintf(trimmed, sizeof trimmed, "%s", src);
+    size_t l = strlen(trimmed);
+    while (l > 1 && plat_is_sep(trimmed[l-1])) trimmed[--l] = 0;
+    const char *b = plat_last_sep(trimmed); b = b ? b + 1 : trimmed;
     char name[256]; snprintf(name, sizeof name, "%s", b);
-    size_t l = strlen(name);
-    while (l && name[l-1] == '/') name[--l] = 0;
     char root[600], dest[900];
-    int is_skin = 0, is_dir = S_ISDIR(st.st_mode);
+    int is_skin = 0, is_dir = st.is_dir;
     if (is_dir) is_skin = !dir_has_osu(src);
     else if (ends_with(name, ".osz")) is_skin = 0;
     else if (ends_with(name, ".osk")) is_skin = 1;
@@ -146,9 +126,9 @@ int import_path_ex(const char *src, char *msg, size_t n, char *dest_out, size_t 
     snprintf(dest, sizeof dest, "%s/%s", root, name);
     mkdir_p(root);
     int rc;
-    if (is_dir) { char *a[] = { "cp", "-rT", (char *)src, dest, NULL }; rc = run(a); }
-    else rc = extract_zip(src, dest);
-    if (rc) snprintf(msg, n, "import failed (is unzip installed?)");
+    if (is_dir) rc = plat_copy_tree(src, dest);
+    else rc = plat_extract_zip(src, dest);
+    if (rc) snprintf(msg, n, "import failed (" PLAT_UNZIP_HINT ")");
     else snprintf(msg, n, "imported %s: %s", is_skin ? "skin" : "song", name);
     if (!rc && dest_out) snprintf(dest_out, dn, "%s", dest);
     return rc;
@@ -166,16 +146,16 @@ static void add(List *l, const char *label, const char *path) {
 static int cmp(const void *a, const void *b) { return strcasecmp(((Entry *)a)->label, ((Entry *)b)->label); }
 
 static void scan_songs_root(List *l, const char *root) {
-    DIR *d = opendir(root); if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        char sub[1100]; snprintf(sub, sizeof sub, "%s/%s", root, e->d_name);
-        DIR *sd = opendir(sub); if (!sd) continue;
-        struct dirent *f;
-        while ((f = readdir(sd))) {
-            if (!ends_with(f->d_name, ".osu")) continue;
-            char p[2200]; snprintf(p, sizeof p, "%s/%s", sub, f->d_name);
+    PlatDir *d = plat_opendir(root); if (!d) return;
+    const char *e;
+    while ((e = plat_readdir(d))) {
+        if (e[0] == '.') continue;
+        char sub[1100]; snprintf(sub, sizeof sub, "%s/%s", root, e);
+        PlatDir *sd = plat_opendir(sub); if (!sd) continue;
+        const char *f;
+        while ((f = plat_readdir(sd))) {
+            if (!ends_with(f, ".osu")) continue;
+            char p[2200]; snprintf(p, sizeof p, "%s/%s", sub, f);
             Beatmap bm;
             if (beatmap_load(&bm, p, 1)) { beatmap_free(&bm); continue; }
             char label[400];
@@ -183,9 +163,9 @@ static void scan_songs_root(List *l, const char *root) {
             add(l, label, p);
             beatmap_free(&bm);
         }
-        closedir(sd);
+        plat_closedir(sd);
     }
-    closedir(d);
+    plat_closedir(d);
 }
 
 void scan_songs(List *l, const char *extra) {
@@ -196,15 +176,15 @@ void scan_songs(List *l, const char *extra) {
 }
 
 static void scan_skins_root(List *l, const char *root) {
-    DIR *d = opendir(root); if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        char p[1100]; snprintf(p, sizeof p, "%s/%s", root, e->d_name);
-        struct stat st; if (stat(p, &st) || !S_ISDIR(st.st_mode)) continue;
-        add(l, e->d_name, p);
+    PlatDir *d = plat_opendir(root); if (!d) return;
+    const char *e;
+    while ((e = plat_readdir(d))) {
+        if (e[0] == '.') continue;
+        char p[1100]; snprintf(p, sizeof p, "%s/%s", root, e);
+        if (!skinfs_isdir(p)) continue;
+        add(l, e, p);
     }
-    closedir(d);
+    plat_closedir(d);
 }
 
 void scan_skins(List *l, const char *extra) {
@@ -215,16 +195,16 @@ void scan_skins(List *l, const char *extra) {
 }
 
 int resolve_skin_arg(const char *arg, const char *extra, char *out, size_t n, char *msg, size_t mn) {
-    struct stat st;
+    PlatStat st;
     out[0] = 0; msg[0] = 0;
     if (!arg || !*arg) return 0;
-    if (!stat(arg, &st)) {
-        if (S_ISDIR(st.st_mode)) { snprintf(out, n, "%s", arg); return 0; }
+    if (!plat_stat(arg, &st)) {
+        if (st.is_dir) { snprintf(out, n, "%s", arg); return 0; }
         if (ends_with(arg, ".osk")) return import_path_ex(arg, msg, mn, out, n);
         snprintf(msg, mn, "skin \"%s\" is neither a folder nor an .osk", arg);
         return -1;
     }
-    if (!strchr(arg, '/')) { /* bare name: look in Skins/ and the extra root */
+    if (!plat_has_sep(arg)) { /* bare name: look in Skins/ and the extra root */
         char r[600], p[1300];
         skins_dir(r, sizeof r); snprintf(p, sizeof p, "%s/%s", r, arg);
         if (skinfs_isdir(p)) { snprintf(out, n, "%s", p); return 0; }

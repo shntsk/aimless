@@ -1,4 +1,5 @@
 #include "gfx.h"
+#include "plat.h"
 #include <SDL_image.h>
 #include <SDL_ttf.h>
 #include <math.h>
@@ -40,18 +41,7 @@ static SDL_Texture *make_disc(int inverse) {
 }
 
 static void find_font(int bold, char *out, size_t n) {
-    const char *q = bold ? "fc-match -f '%{file}' 'SF Pro Display:bold,Inter:bold,Helvetica Neue:bold,sans:bold' 2>/dev/null"
-                         : "fc-match -f '%{file}' 'SF Pro Text,Inter,Helvetica Neue,sans' 2>/dev/null";
-    out[0] = 0;
-    FILE *p = popen(q, "r");
-    if (p) { if (!fgets(out, (int)n, p)) out[0] = 0; pclose(p); }
-    if (out[0]) { FILE *t = fopen(out, "r"); if (t) fclose(t); else out[0] = 0; }
-    static const char *fb[] = { "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-                                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", NULL };
-    static const char *fbb[] = { "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-                                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", NULL };
-    const char **l = bold ? fbb : fb;
-    for (int i = 0; !out[0] && l[i]; i++) { FILE *t = fopen(l[i], "r"); if (t) { fclose(t); snprintf(out, n, "%s", l[i]); } }
+    plat_find_font(bold, bold ? "SF Pro Display:bold,Inter:bold,Helvetica Neue:bold,sans:bold" : "SF Pro Text,Inter,Helvetica Neue,sans", out, n);
 }
 
 void gfx_init(SDL_Renderer *r) {

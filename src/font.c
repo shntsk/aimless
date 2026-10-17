@@ -1,18 +1,17 @@
 #include "font.h"
+#include "plat.h"
 #include <stdio.h>
 #include <string.h>
 
 TTF_Font *font_open(int size) {
     static char path[512]; static int probed;
-    if (!probed) {
-        probed = 1;
-        FILE *p = popen("fc-match -f '%{file}' sans 2>/dev/null", "r");
-        if (p) { if (!fgets(path, sizeof path, p)) path[0] = 0; pclose(p); }
-    }
+    if (!probed) { probed = 1; plat_find_font(0, "sans", path, sizeof path); }
     TTF_Font *f = path[0] ? TTF_OpenFont(path, size) : NULL;
-    static const char *fallback[] = { "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-                                      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", NULL };
-    for (int i = 0; !f && fallback[i]; i++) f = TTF_OpenFont(fallback[i], size);
+    if (!f) {                                        /* the chosen file did not load: try the known fonts */
+        static char alt[512]; static int probed2;
+        if (!probed2) { probed2 = 1; plat_find_font(0, NULL, alt, sizeof alt); }
+        if (alt[0] && strcmp(alt, path)) f = TTF_OpenFont(alt, size);
+    }
     return f;
 }
 

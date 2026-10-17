@@ -1,32 +1,51 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra
 PKGS     = sdl2 SDL2_image SDL2_mixer SDL2_ttf
+# Windows (MinGW-w64, native in MSYS2 or cross): `make CC=x86_64-w64-mingw32-gcc` also works. Kept apart from
+# CFLAGS so `make CFLAGS=...` on the command line keeps them.
+ifneq (,$(or $(findstring mingw,$(CC)),$(findstring Windows,$(OS))))
+EXE         = .exe
+PLAT_CFLAGS = -D__USE_MINGW_ANSI_STDIO=1 -D_USE_MATH_DEFINES
+endif
 # kept separate from CFLAGS so `make CFLAGS=...` on the command line still finds SDL
 SDL_CFLAGS = $(shell pkg-config --cflags $(PKGS))
 LDLIBS   = $(shell pkg-config --libs $(PKGS)) -lm
 SRC      = $(wildcard src/*.c)
 
-aimless: $(SRC) $(wildcard src/*.h)
-	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(SRC) -o $@ $(LDLIBS)
+aimless$(EXE): $(SRC) $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(PLAT_CFLAGS) $(SDL_CFLAGS) $(SRC) -o $@ $(LDLIBS)
 
-# skin discovery tests (parser, file lookup, .osk import, circle-number layout) + loader test on a fake SDL; no SDL needed. OSK=/path/to/skin.osk adds a real-skin run
+# test_plat (file system / process / zip-import layer, no shell) runs on every platform.
+# test_skin (parser, file lookup, .osk import, circle-number layout) and test_skin_loader (src/skin.c on a fake SDL,
+# see tests/sdlfake) drive the shell (mkdir, zip, rm), so they are POSIX only for now. None of them needs SDL.
+# OSK=/path/to/skin.osk adds a real-skin run to the POSIX tests.
 OSK ?=
-test: tests/test_skin tests/test_skin_loader
+TESTS_POSIX = tests/test_skin tests/test_skin_loader
+ifneq (,$(EXE))
+TESTS_POSIX =
+endif
+test: tests/test_plat$(EXE) $(TESTS_POSIX)
+	./tests/test_plat$(EXE)
+ifneq (,$(TESTS_POSIX))
 	./tests/test_skin $(if $(OSK),"$(OSK)")
 	./tests/test_skin_loader $(if $(OSK),"$(OSK)")
+endif
 
-tests/test_skin: tests/test_skin.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c $(wildcard src/*.h)
-	$(CC) $(CFLAGS) tests/test_skin.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c -o $@ -lm
+tests/test_plat$(EXE): tests/test_plat.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(PLAT_CFLAGS) tests/test_plat.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c -o $@ -lm
+
+tests/test_skin: tests/test_skin.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) tests/test_skin.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c -o $@ -lm
 
 # runs the real src/skin.c against a fake SDL (tests/sdlfake): checks which files the circle digits load from, not rendering
-tests/test_skin_loader: tests/test_skin_loader.c src/skin.c src/skinfs.c src/skinini.c tests/sdlfake/fake.c $(wildcard src/*.h) $(wildcard tests/sdlfake/*.h)
-	$(CC) $(CFLAGS) -Itests/sdlfake tests/test_skin_loader.c src/skin.c src/skinfs.c src/skinini.c tests/sdlfake/fake.c -o $@ -lm
+tests/test_skin_loader: tests/test_skin_loader.c src/skin.c src/plat.c src/skinfs.c src/skinini.c tests/sdlfake/fake.c $(wildcard src/*.h) $(wildcard tests/sdlfake/*.h)
+	$(CC) $(CFLAGS) -Itests/sdlfake tests/test_skin_loader.c src/skin.c src/plat.c src/skinfs.c src/skinini.c tests/sdlfake/fake.c -o $@ -lm
 
 clean:
-	rm -f aimless tests/test_skin tests/test_skin_loader
+	rm -f aimless aimless.exe tests/test_plat tests/test_skin tests/test_skin_loader tests/*.exe
 
 PREFIX ?= /usr/local
-install: aimless
-	install -Dm755 aimless $(DESTDIR)$(PREFIX)/bin/aimless
+install: aimless$(EXE)
+	install -Dm755 aimless$(EXE) $(DESTDIR)$(PREFIX)/bin/aimless$(EXE)
 
 .PHONY: clean install test

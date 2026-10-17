@@ -15,3 +15,46 @@ jobs:
       - run: make
       - run: make test
       - run: ./aimless 2>&1 | head -1 || true
+
+  windows:
+    # Native Windows x86_64 build with MSYS2 / MinGW-w64 (MINGW64 environment).
+    # Gating steps: full build (every src/*.c, so gameplay, ui, audio, gfx and plat all have to compile and link) and test_plat.
+    # Not covered: running the game (needs a window / audio device) and test_skin / test_skin_loader (POSIX only, see Makefile).
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_image
+            mingw-w64-x86_64-SDL2_mixer
+            mingw-w64-x86_64-SDL2_ttf
+      - name: Toolchain info
+        run: |
+          gcc --version | head -1
+          gcc -dumpmachine
+          pkg-config --modversion sdl2 SDL2_image SDL2_mixer SDL2_ttf
+          ls -l "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe"
+      - name: Build (full project)
+        run: |
+          make CC=gcc
+          test -f aimless.exe
+          ldd aimless.exe | grep -i -E "sdl2|mingw" || true
+      - name: Tests (test_plat, zip extraction is required)
+        env:
+          AIMLESS_TEST_REQUIRE_ZIP: "1"
+        run: make CC=gcc test
+      - name: Smoke - aimless.exe starts and exits (no SDL init, no window)
+        run: |
+          ./aimless.exe import does-not-exist.osz
+          echo "exit code: $?"

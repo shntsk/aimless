@@ -1,4 +1,5 @@
 #include "mapinfo.h"
+#include "plat.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +38,7 @@ static double weighted(Peaks *p) {
 int mapinfo_scan(const char *path, MapInfo *m) {
     memset(m, 0, sizeof *m);
     m->cs = 4; m->od = 5; m->hp = 5; m->ar = -1; m->preview_ms = -1;
-    FILE *f = fopen(path, "r");
+    FILE *f = plat_fopen(path, "rb");
     if (!f) return -1;
     char line[4096];
     int sec = 0;

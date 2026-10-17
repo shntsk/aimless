@@ -7,3 +7,8 @@ skins/*
 *.osu
 *.mp3
 *.ogg
+aimless.exe
+tests/test_plat
+tests/test_skin
+tests/test_skin_loader
+tests/*.exe

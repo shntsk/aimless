@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
+#include "plat.h"
 
 #define MAX_INI (4L << 20) /* a skin.ini larger than 4 MB is not a skin.ini */
 
@@ -59,7 +59,7 @@ void skinini_parse(const char *buf, long len, skinini_cb cb, void *ud) {
 }
 
 int skinini_read(const char *path, skinini_cb cb, void *ud) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = plat_fopen(path, "rb");
     if (!f) return -1;
     if (fseek(f, 0, SEEK_END) || ftell(f) < 0) { fclose(f); return -1; }
     long n = ftell(f);

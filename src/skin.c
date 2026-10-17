@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
+#include "plat.h"
 
 /* Image lookup, osu! stable order: name@2x.png, name@2x.jpg, name.png, name.jpg. Names are matched
  * ignoring case and may contain sub-folders. A file that exists but cannot be decoded is reported once

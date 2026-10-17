@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include <strings.h>
+#include "plat.h"
 
 static void trim(char *s) {
     size_t n = strlen(s);
@@ -184,10 +184,10 @@ int beatmap_load(Beatmap *b, const char *path, int meta_only) {
     memset(b, 0, sizeof *b);
     b->cs = 4; b->ar = 5; b->od = 5; b->sm = 1.4f; b->tickrate = 1; b->default_set = 1;
     snprintf(b->path, sizeof b->path, "%s", path);
-    FILE *f = fopen(path, "r");
+    FILE *f = plat_fopen(path, "rb");
     if (!f) return -1;
 
-    const char *slash = strrchr(path, '/');
+    const char *slash = plat_last_sep(path);
     if (slash) { size_t n = slash - path; if (n > 500) n = 500; memcpy(b->dir, path, n); b->dir[n] = 0; }
     else strcpy(b->dir, ".");
 

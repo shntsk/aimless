@@ -1,36 +1,34 @@
 /* Case-insensitive, sandboxed file lookup for skin folders. See skinfs.h. */
 #include "skinfs.h"
-#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
+#include "plat.h"
 
 int skinfs_isdir(const char *path) {
-    struct stat st;
-    return path && *path && !stat(path, &st) && S_ISDIR(st.st_mode);
+    PlatStat st;
+    return path && *path && !plat_stat(path, &st) && st.is_dir;
 }
 
 static int is_file(const char *path) {
-    struct stat st;
-    return !stat(path, &st) && S_ISREG(st.st_mode);
+    PlatStat st;
+    return !plat_stat(path, &st) && st.is_reg;
 }
 
 /* Find an entry of dir whose name equals comp ignoring case; copies the real name into out. */
 static int find_ci(const char *dir, const char *comp, char *out, size_t n) {
-    DIR *d = opendir(dir);
+    PlatDir *d = plat_opendir(dir);
     if (!d) return 0;
-    struct dirent *e;
+    const char *e;
     int found = 0;
-    while ((e = readdir(d))) {
-        if (!strcasecmp(e->d_name, comp)) {
+    while ((e = plat_readdir(d))) {
+        if (!strcasecmp(e, comp)) {
             /* when two names differ only by case, keep scanning only if this one is not an exact match */
-            snprintf(out, n, "%s", e->d_name);
+            snprintf(out, n, "%s", e);
             found = 1;
-            if (!strcmp(e->d_name, comp)) break;
+            if (!strcmp(e, comp)) break;
         }
     }
-    closedir(d);
+    plat_closedir(d);
     return found;
 }
 
@@ -88,15 +86,15 @@ static int has_ext(const char *name, const char *ext) {
 }
 
 int skinfs_looks_like_skin(const char *dir) {
-    DIR *d = opendir(dir);
+    PlatDir *d = plat_opendir(dir);
     if (!d) return 0;
-    struct dirent *e;
+    const char *e;
     int ok = 0;
-    while (!ok && (e = readdir(d))) {
-        const char *nm = e->d_name;
+    while (!ok && (e = plat_readdir(d))) {
+        const char *nm = e;
         if (!strcasecmp(nm, "skin.ini") || has_ext(nm, ".png") || has_ext(nm, ".jpg") || has_ext(nm, ".jpeg") ||
             has_ext(nm, ".wav") || has_ext(nm, ".ogg") || has_ext(nm, ".mp3")) ok = 1;
     }
-    closedir(d);
+    plat_closedir(d);
     return ok;
 }

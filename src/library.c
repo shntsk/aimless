@@ -2,13 +2,11 @@
 #include "library.h"
 #include "paths.h"
 #include <ctype.h>
-#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
+#include "plat.h"
 
 /* ---------- on-disk cache: path + mtime + size -> MapInfo ---------- */
 typedef struct { char path[1024]; long mtime, size; MapInfo mi; } CEnt;
@@ -29,7 +27,7 @@ static void cache_index(Cache *c) {
 static void cache_load(Cache *c) {
     memset(c, 0, sizeof *c);
     char p[600]; cache_path(p, sizeof p);
-    FILE *f = fopen(p, "rb");
+    FILE *f = plat_fopen(p, "rb");
     if (f) {
         char mg[8]; int n = 0, sz = 0;
         if (fread(mg, 8, 1, f) == 1 && !memcmp(mg, MAGIC, 8) && fread(&sz, sizeof sz, 1, f) == 1 && sz == (int)sizeof(CEnt) &&
@@ -54,12 +52,12 @@ static CEnt *cache_find(Cache *c, const char *path, long mtime, long size) {
 
 static void cache_save(CEnt *e, int n) {
     char p[600], tmp[620]; cache_path(p, sizeof p); snprintf(tmp, sizeof tmp, "%s.tmp", p);
-    FILE *f = fopen(tmp, "wb"); if (!f) return;
+    FILE *f = plat_fopen(tmp, "wb"); if (!f) return;
     int sz = (int)sizeof(CEnt);
     fwrite(MAGIC, 8, 1, f); fwrite(&sz, sizeof sz, 1, f); fwrite(&n, sizeof n, 1, f);
     fwrite(e, sizeof(CEnt), n, f);
     fclose(f);
-    rename(tmp, p);
+    plat_rename(tmp, p);
 }
 
 /* ---------- scanning ---------- */
@@ -72,28 +70,28 @@ static int dcmp_stars(const void *a, const void *b) {
 typedef struct { CEnt *out; int n, cap; int fresh; int done; ProgressFn cb; void *ud; Cache *cache; } ScanCtx;
 
 static void scan_root(Library *l, const char *root, ScanCtx *sc) {
-    DIR *d = opendir(root); if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        char dir[1024]; snprintf(dir, sizeof dir, "%s/%s", root, e->d_name);
-        struct stat ds; if (stat(dir, &ds) || !S_ISDIR(ds.st_mode)) continue;
-        DIR *sd = opendir(dir); if (!sd) continue;
+    PlatDir *d = plat_opendir(root); if (!d) return;
+    const char *e;
+    while ((e = plat_readdir(d))) {
+        if (e[0] == '.') continue;
+        char dir[1024]; snprintf(dir, sizeof dir, "%s/%s", root, e);
+        PlatStat ds; if (plat_stat(dir, &ds) || !ds.is_dir) continue;
+        PlatDir *sd = plat_opendir(dir); if (!sd) continue;
         MapSet set; memset(&set, 0, sizeof set);
         snprintf(set.dir, sizeof set.dir, "%s", dir);
-        set.mtime = (long)ds.st_mtime;
-        struct dirent *f; int cap = 0;
-        while ((f = readdir(sd))) {
-            if (!ends_osu(f->d_name)) continue;
-            char p[1024]; snprintf(p, sizeof p, "%s/%s", dir, f->d_name);
-            struct stat fs; if (stat(p, &fs)) continue;
-            CEnt *ce = cache_find(sc->cache, p, (long)fs.st_mtime, (long)fs.st_size);
+        set.mtime = (long)ds.mtime;
+        const char *f; int cap = 0;
+        while ((f = plat_readdir(sd))) {
+            if (!ends_osu(f)) continue;
+            char p[1024]; snprintf(p, sizeof p, "%s/%s", dir, f);
+            PlatStat fs; if (plat_stat(p, &fs)) continue;
+            CEnt *ce = cache_find(sc->cache, p, (long)fs.mtime, (long)fs.size);
             if (sc->n == sc->cap) { sc->cap = sc->cap ? sc->cap * 2 : 1024; sc->out = realloc(sc->out, sc->cap * sizeof(CEnt)); }
             CEnt *o = &sc->out[sc->n];
             if (ce) *o = *ce;
             else {
                 memset(o, 0, sizeof *o);
-                snprintf(o->path, sizeof o->path, "%s", p); o->mtime = (long)fs.st_mtime; o->size = (long)fs.st_size;
+                snprintf(o->path, sizeof o->path, "%s", p); o->mtime = (long)fs.mtime; o->size = (long)fs.size;
                 if (mapinfo_scan(p, &o->mi)) continue;
                 sc->fresh++;
             }
@@ -103,7 +101,7 @@ static void scan_root(Library *l, const char *root, ScanCtx *sc) {
             snprintf(df->path, sizeof df->path, "%s", o->path); df->mi = o->mi; df->mtime = o->mtime;
             if (sc->cb && ++sc->done % 25 == 0) sc->cb(sc->done, sc->ud);
         }
-        closedir(sd);
+        plat_closedir(sd);
         if (!set.nd) { free(set.d); continue; }
         qsort(set.d, set.nd, sizeof(Diff), dcmp_stars);
         set.smin = set.d[0].mi.stars; set.smax = set.d[set.nd - 1].mi.stars;
@@ -114,7 +112,7 @@ static void scan_root(Library *l, const char *root, ScanCtx *sc) {
         l->s = realloc(l->s, (l->n + 1) * sizeof(MapSet));
         l->s[l->n++] = set; l->ndiff += set.nd;
     }
-    closedir(d);
+    plat_closedir(d);
 }
 
 void lib_scan(Library *l, const char *extra, ProgressFn cb, void *ud) {
@@ -216,7 +214,7 @@ static int diff_ok(const Query *q, const MapSet *s, const Diff *d) {
     if (q->nt) {
         char hay[1100];
         snprintf(hay, sizeof hay, "%s %s %s %s %s %s", s->d[0].mi.title, s->d[0].mi.artist, m->creator, m->version, m->source, m->tags);
-        for (int i = 0; i < q->nt; i++) if (!strcasestr(hay, q->terms[i])) return 0;
+        for (int i = 0; i < q->nt; i++) if (!plat_strcasestr(hay, q->terms[i])) return 0;
     }
     return 1;
 }

@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
+#include "plat.h"
 
 #define NL_DEFAULT_PREFIX "default"
 
