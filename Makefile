@@ -31,8 +31,8 @@ ifneq (,$(TESTS_POSIX))
 	./tests/test_skin_loader $(if $(OSK),"$(OSK)")
 endif
 
-tests/test_plat$(EXE): tests/test_plat.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c $(wildcard src/*.h)
-	$(CC) $(CFLAGS) $(PLAT_CFLAGS) tests/test_plat.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c -o $@ -lm
+tests/test_plat$(EXE): tests/test_plat.c tests/zipdata.h src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(PLAT_CFLAGS) tests/test_plat.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c -o $@ -lm $(if $(EXE),-lshell32)
 
 tests/test_skin: tests/test_skin.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c $(wildcard src/*.h)
 	$(CC) $(CFLAGS) tests/test_skin.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c -o $@ -lm

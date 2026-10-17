@@ -458,6 +458,329 @@ static int cp_tree(const char *src, const char *dst, int depth) {
 
 int plat_copy_tree(const char *src, const char *dst) { return cp_tree(src, dst, 0); }
 
+/* ---- built-in zip extraction ------------------------------------------------------------------------------------
+ * Reads .zip files in-process (stored + deflate), so importing does not depend on which unzip/tar the machine has,
+ * on its locale (Info-ZIP unzip turns UTF-8 names into "#U00fa" escapes outside a UTF-8 locale) or on how a tool
+ * decodes non-ANSI command-line arguments (Windows tar.exe). Only plat_fopen / plat_mkdir_p are used for output, so
+ * every name is UTF-8 on every platform. Not supported (plat_extract_zip falls back to the system tools): zip64,
+ * encryption, other methods, entries over ZIP_MAX_ENTRY. Inflate follows the structure of zlib's contrib/puff. */
+#include <setjmp.h>
+#include <stdint.h>
+
+#define ZIP_MAX_ENTRY (1024LL * 1024 * 1024)   /* bigger entries go to the system tools */
+#define ZIP_MAX_CDIR  (64L * 1024 * 1024)
+
+typedef struct {
+    const unsigned char *in; size_t inlen, incnt;
+    unsigned char *out; size_t outlen, outcnt;
+    int bitbuf, bitcnt;
+    jmp_buf env;
+} Inf;
+typedef struct { short count[16]; short symbol[288]; } Huff;
+
+static int inf_bits(Inf *s, int need) {
+    long val = s->bitbuf;
+    while (s->bitcnt < need) {
+        if (s->incnt == s->inlen) longjmp(s->env, 1);          /* ran out of input */
+        val |= (long)s->in[s->incnt++] << s->bitcnt;
+        s->bitcnt += 8;
+    }
+    s->bitbuf = (int)(val >> need);
+    s->bitcnt -= need;
+    return (int)(val & ((1L << need) - 1));
+}
+
+static int inf_decode(Inf *s, const Huff *h) {
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len <= 15; len++) {
+        code |= inf_bits(s, 1);
+        int count = h->count[len];
+        if (code - count < first) return h->symbol[index + (code - first)];
+        index += count; first += count; first <<= 1; code <<= 1;
+    }
+    return -10;                                                 /* ran out of codes */
+}
+
+static int inf_construct(Huff *h, const short *length, int n) {   /* 0 complete, >0 incomplete, <0 over-subscribed */
+    short offs[16];
+    for (int len = 0; len <= 15; len++) h->count[len] = 0;
+    for (int sym = 0; sym < n; sym++) h->count[length[sym]]++;
+    if (h->count[0] == n) return 0;
+    int left = 1;
+    for (int len = 1; len <= 15; len++) { left <<= 1; left -= h->count[len]; if (left < 0) return left; }
+    offs[1] = 0;
+    for (int len = 1; len < 15; len++) offs[len + 1] = (short)(offs[len] + h->count[len]);
+    for (int sym = 0; sym < n; sym++) if (length[sym]) h->symbol[offs[length[sym]]++] = (short)sym;
+    return left;
+}
+
+static int inf_codes(Inf *s, const Huff *lc, const Huff *dc) {
+    static const short lens[29] = { 3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258 };
+    static const short lext[29] = { 0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0 };
+    static const short dists[30] = { 1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577 };
+    static const short dext[30] = { 0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13 };
+    int sym;
+    do {
+        sym = inf_decode(s, lc);
+        if (sym < 0) return sym;
+        if (sym < 256) {
+            if (s->outcnt == s->outlen) return 1;
+            s->out[s->outcnt++] = (unsigned char)sym;
+        } else if (sym > 256) {
+            sym -= 257;
+            if (sym >= 29) return -10;
+            int len = lens[sym] + inf_bits(s, lext[sym]);
+            sym = inf_decode(s, dc);
+            if (sym < 0) return sym;
+            if (sym >= 30) return -10;
+            size_t dist = (size_t)(dists[sym] + inf_bits(s, dext[sym]));
+            if (dist > s->outcnt) return -11;
+            if (s->outcnt + (size_t)len > s->outlen) return 1;
+            while (len--) { s->out[s->outcnt] = s->out[s->outcnt - dist]; s->outcnt++; }
+        }
+    } while (sym != 256);
+    return 0;
+}
+
+static int inf_stored(Inf *s) {
+    s->bitbuf = 0; s->bitcnt = 0;
+    if (s->incnt + 4 > s->inlen) return 2;
+    unsigned len = s->in[s->incnt] | (unsigned)s->in[s->incnt + 1] << 8;
+    unsigned nlen = s->in[s->incnt + 2] | (unsigned)s->in[s->incnt + 3] << 8;
+    s->incnt += 4;
+    if (len != (~nlen & 0xFFFFu)) return -2;
+    if (s->incnt + len > s->inlen) return 2;
+    if (s->outcnt + len > s->outlen) return 1;
+    memcpy(s->out + s->outcnt, s->in + s->incnt, len);
+    s->incnt += len; s->outcnt += len;
+    return 0;
+}
+
+static int inf_fixed(Inf *s) {
+    static Huff lc, dc; static int built;                       /* constant tables, built once (benign race) */
+    if (!built) {
+        short l[288]; int i;
+        for (i = 0; i < 144; i++) l[i] = 8;
+        for (; i < 256; i++) l[i] = 9;
+        for (; i < 280; i++) l[i] = 7;
+        for (; i < 288; i++) l[i] = 8;
+        inf_construct(&lc, l, 288);
+        for (i = 0; i < 30; i++) l[i] = 5;
+        inf_construct(&dc, l, 30);
+        built = 1;
+    }
+    return inf_codes(s, &lc, &dc);
+}
+
+static int inf_dynamic(Inf *s) {
+    static const short order[19] = { 16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15 };
+    short lengths[320]; Huff lc, dc;
+    int nlen = inf_bits(s, 5) + 257, ndist = inf_bits(s, 5) + 1, ncode = inf_bits(s, 4) + 4, index;
+    if (nlen > 286 || ndist > 30) return -3;
+    for (index = 0; index < ncode; index++) lengths[order[index]] = (short)inf_bits(s, 3);
+    for (; index < 19; index++) lengths[order[index]] = 0;
+    if (inf_construct(&lc, lengths, 19) != 0) return -4;
+    index = 0;
+    while (index < nlen + ndist) {
+        int sym = inf_decode(s, &lc), len = 0;
+        if (sym < 0) return sym;
+        if (sym < 16) lengths[index++] = (short)sym;
+        else {
+            if (sym == 16) { if (index == 0) return -5; len = lengths[index - 1]; sym = 3 + inf_bits(s, 2); }
+            else if (sym == 17) sym = 3 + inf_bits(s, 3);
+            else sym = 11 + inf_bits(s, 7);
+            if (index + sym > nlen + ndist) return -6;
+            while (sym--) lengths[index++] = (short)len;
+        }
+    }
+    if (lengths[256] == 0) return -9;
+    int err = inf_construct(&lc, lengths, nlen);
+    if (err && (err < 0 || nlen != lc.count[0] + lc.count[1])) return -7;
+    err = inf_construct(&dc, lengths + nlen, ndist);
+    if (err && (err < 0 || ndist != dc.count[0] + dc.count[1])) return -8;
+    return inf_codes(s, &lc, &dc);
+}
+
+/* raw deflate stream -> exactly outlen bytes; 0 on success */
+static int inflate_raw(const unsigned char *in, size_t inlen, unsigned char *out, size_t outlen) {
+    Inf s; memset(&s, 0, sizeof s);
+    s.in = in; s.inlen = inlen; s.out = out; s.outlen = outlen;
+    if (setjmp(s.env)) return 2;
+    int last, err = 0;
+    do {
+        last = inf_bits(&s, 1);
+        int type = inf_bits(&s, 2);
+        err = type == 0 ? inf_stored(&s) : type == 1 ? inf_fixed(&s) : type == 2 ? inf_dynamic(&s) : -1;
+        if (err) break;
+    } while (!last);
+    return err ? err : (s.outcnt == outlen ? 0 : -12);
+}
+
+static uint32_t zip_crc(uint32_t crc, const unsigned char *p, size_t n) {   /* running CRC-32, start with 0 */
+    static uint32_t tab[256]; static int built;
+    if (!built) {
+        for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1))); tab[i] = c; }
+        built = 1;
+    }
+    crc = ~crc;
+    while (n--) crc = tab[(crc ^ *p++) & 255] ^ (crc >> 8);
+    return ~crc;
+}
+
+static unsigned zr16(const unsigned char *p) { return p[0] | (unsigned)p[1] << 8; }
+static uint32_t zr32(const unsigned char *p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static int zseek(FILE *f, long long off) {
+#ifdef _WIN32
+    return _fseeki64(f, off, SEEK_SET);
+#else
+    return fseeko(f, (off_t)off, SEEK_SET);
+#endif
+}
+
+/* Member name -> safe relative UTF-8 path under dest. Backslashes are separators (archives made on Windows), "."
+ * and empty components are dropped, anything that could leave dest (".." component, absolute path)
+ * is refused (on Windows also components made only of dots/spaces, and the characters Windows forbids are replaced by '_'). Names that are not valid UTF-8 are read as Latin-1. Returns 0, or -1 if unsafe/empty. */
+static int zip_clean_name(const char *raw, size_t n, char *out, size_t cap, int *is_dir) {
+    char *tmp = malloc(n * 2 + 2);
+    if (!tmp) return -1;
+    int valid = 1;
+    for (size_t i = 0; i < n && valid; ) {
+        unsigned char c = (unsigned char)raw[i];
+        int k = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        if (!k || i + (size_t)k > n) { valid = 0; break; }
+        for (int j = 1; j < k; j++) if (((unsigned char)raw[i + (size_t)j] >> 6) != 2) valid = 0;
+        i += (size_t)k;
+    }
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)raw[i];
+        if (!c) { free(tmp); return -1; }
+        if (c == '\\') c = '/';
+        if (c >= 0x80 && !valid) { tmp[o++] = (char)(0xC0 | (c >> 6)); tmp[o++] = (char)(0x80 | (c & 0x3F)); }
+        else tmp[o++] = (char)c;
+    }
+    tmp[o] = 0;
+    *is_dir = o > 0 && tmp[o - 1] == '/';
+    size_t w = 0; int rc = 0;
+    for (char *p = tmp; *p; ) {
+        char *e = p; while (*e && *e != '/') e++;
+        size_t cl = (size_t)(e - p);
+        if (cl == 2 && p[0] == '.' && p[1] == '.') { rc = -1; break; }
+#ifdef _WIN32
+        {   /* Win32 trims trailing dots and spaces from a component, so ".. " or "..." would act as ".." */
+            size_t k = cl; while (k && (p[k - 1] == '.' || p[k - 1] == ' ')) k--;
+            if (!k && cl && !(cl == 1 && p[0] == '.')) { rc = -1; break; }
+        }
+#endif
+        if (w == 0 && p == tmp && cl == 0 && *e == '/') { rc = -1; break; }   /* absolute path */
+        if (cl && !(cl == 1 && p[0] == '.')) {
+            if (w + cl + 2 > cap) { rc = -1; break; }
+            if (w) out[w++] = '/';
+            for (size_t i = 0; i < cl; i++) {
+                char c = p[i];
+#ifdef _WIN32
+                if (c == ':' || c == '<' || c == '>' || c == '"' || c == '|' || c == '?' || c == '*' || (unsigned char)c < 32) c = '_';   /* not allowed in Windows names */
+#endif
+                out[w + i] = c;
+            }
+            w += cl;
+        }
+        p = *e ? e + 1 : e;
+    }
+    out[w] = 0;
+    free(tmp);
+    if (rc) return -1;
+    return w || *is_dir ? 0 : -1;
+}
+
+static int zip_write_entry(FILE *zf, long long lho, unsigned method, uint32_t crc, uint32_t csize, uint32_t usize, const char *path) {
+    unsigned char lh[30];
+    if (zseek(zf, lho) || fread(lh, 1, 30, zf) != 30 || zr32(lh) != 0x04034b50u) return -1;
+    if (zseek(zf, lho + 30 + zr16(lh + 26) + zr16(lh + 28))) return -1;
+    FILE *o = plat_fopen(path, "wb");
+    if (!o) return -1;
+    uint32_t got = 0; int rc = 0;
+    if (method == 0) {                                          /* stored: stream it */
+        if (csize != usize) rc = -1;
+        unsigned char buf[65536];
+        for (uint32_t left = csize; !rc && left; ) {
+            size_t k = left < sizeof buf ? left : sizeof buf;
+            if (fread(buf, 1, k, zf) != k || fwrite(buf, 1, k, o) != k) { rc = -1; break; }
+            got = zip_crc(got, buf, k); left -= (uint32_t)k;
+        }
+    } else {
+        unsigned char *cb = malloc(csize ? csize : 1), *ub = malloc(usize ? usize : 1);
+        if (!cb || !ub) rc = -1;
+        else if (fread(cb, 1, csize, zf) != csize) rc = -1;
+        else if (inflate_raw(cb, csize, ub, usize)) rc = -1;
+        else if (usize && fwrite(ub, 1, usize, o) != usize) rc = -1;
+        else got = zip_crc(0, ub, usize);
+        free(cb); free(ub);
+    }
+    if (fclose(o)) rc = -1;
+    if (!rc && got != crc) rc = -1;
+    return rc;
+}
+
+int plat_extract_zip_builtin(const char *zip, const char *dest) {
+    FILE *zf = plat_fopen(zip, "rb");
+    if (!zf) return -1;
+    if (plat_mkdir_p(dest)) { fclose(zf); return -1; }
+    int rc = -1;
+    unsigned char *cd = NULL;
+    unsigned char tail[65557 + 22];
+    if (fseek(zf, 0, SEEK_END)) goto done;
+    long long size = (long long)ftell(zf);
+#ifdef _WIN32
+    { __int64 p = _ftelli64(zf); if (p >= 0) size = p; }
+#else
+    { off_t p = ftello(zf); if (p >= 0) size = p; }
+#endif
+    if (size < 22) goto done;
+    size_t tl = size < (long long)sizeof tail ? (size_t)size : sizeof tail;
+    if (zseek(zf, size - (long long)tl) || fread(tail, 1, tl, zf) != tl) goto done;
+    long e = -1;
+    for (long i = (long)tl - 22; i >= 0; i--) if (zr32(tail + i) == 0x06054b50u) { e = i; break; }
+    if (e < 0) goto done;
+    unsigned nent = zr16(tail + e + 10);
+    uint32_t cdsize = zr32(tail + e + 12), cdoff = zr32(tail + e + 16);
+    if (zr16(tail + e + 8) == 0xFFFF || nent == 0xFFFF || cdsize == 0xFFFFFFFFu || cdoff == 0xFFFFFFFFu) { rc = 1; goto done; }   /* zip64 */
+    if (cdsize > ZIP_MAX_CDIR || (long long)cdoff + cdsize > size) goto done;
+    cd = malloc(cdsize ? cdsize : 1);
+    if (!cd || zseek(zf, cdoff) || fread(cd, 1, cdsize, zf) != cdsize) goto done;
+
+    size_t dl = strlen(dest);
+    char path[1100], rel[1000];
+    rc = 0;
+    for (int pass = 0; pass < 2 && rc == 0; pass++) {   /* pass 0 checks every entry, pass 1 writes: nothing is written for a refused archive */
+        size_t pos = 0;
+        for (unsigned i = 0; i < nent; i++) {
+            if (pos + 46 > cdsize || zr32(cd + pos) != 0x02014b50u) { rc = -1; break; }
+            const unsigned char *h = cd + pos;
+            unsigned flags = zr16(h + 8), method = zr16(h + 10), nl = zr16(h + 28), el = zr16(h + 30), cl = zr16(h + 32);
+            uint32_t crc = zr32(h + 16), cs = zr32(h + 20), us = zr32(h + 24), lho = zr32(h + 42);
+            if (pos + 46 + nl + el + cl > cdsize) { rc = -1; break; }
+            const char *name = (const char *)h + 46;
+            pos += 46 + nl + el + cl;
+            int is_dir;
+            if (zip_clean_name(name, nl, rel, sizeof rel, &is_dir)) { rc = -2; break; }
+            if (flags & 1 || (method != 0 && method != 8) || cs == 0xFFFFFFFFu || us == 0xFFFFFFFFu || (long long)us > ZIP_MAX_ENTRY || (long long)cs > ZIP_MAX_ENTRY) { rc = 1; break; }
+            if (dl + 1 + strlen(rel) + 1 > sizeof path) { rc = -1; break; }
+            if (!pass) continue;
+            snprintf(path, sizeof path, "%s/%s", dest, rel);
+            if (is_dir) { if (rel[0] && plat_mkdir_p(path)) { rc = -1; break; } continue; }
+            char *sl = (char *)plat_last_sep(path);
+            if (sl && sl > path + dl) { char c = *sl; *sl = 0; int mk = plat_mkdir_p(path); *sl = c; if (mk) { rc = -1; break; } }
+            if (zip_write_entry(zf, lho, method, crc, cs, us, path)) { rc = -1; break; }
+        }
+    }
+done:
+    free(cd);
+    fclose(zf);
+    return rc;
+}
+
 /* Info-ZIP unzip exits with 1 for "completed with warnings" (typical for Windows-made archives with backslash
  * paths), which is not a failure. bsdtar/tar.exe refuse ".." and absolute member paths by default, as unzip does. */
 static int run_unzip(const char *zip, const char *dest) {
@@ -473,7 +796,10 @@ static int run_tar(const char *exe, const char *zip, const char *dest) {
 
 int plat_extract_zip(const char *zip, const char *dest) {
     if (plat_mkdir_p(dest)) return -1;
-    int rc;
+    int rc = plat_extract_zip_builtin(zip, dest);
+    if (rc == 0) return 0;
+    if (rc == -2) return -1;      /* unsafe member name (.., absolute path): refuse, the system tools are not asked */
+    /* unsupported feature (zip64, other methods, huge entry) or not readable as a zip: try the system tools */
 #ifdef _WIN32
     char st[700];
     if (system_tar(st, sizeof st)) return run_tar(st, zip, dest) == 0 ? 0 : -1;

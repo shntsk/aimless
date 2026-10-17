@@ -3,8 +3,9 @@
  * library cache. No shell, no zip/rm/cp/mkdir commands, no SDL: the same test runs on Linux and on Windows
  * (MinGW). Every path lives under a directory whose name contains non-ASCII characters (UTF-8 on purpose).
  *
- * Zip extraction needs a system extractor (unzip/bsdtar on POSIX, System32\tar.exe on Windows). If none works the
- * archive cases are reported as SKIPPED, unless AIMLESS_TEST_REQUIRE_ZIP=1 is set (then it is a failure).
+ * Zip extraction uses the built-in reader (src/plat.c); the system tools (unzip/bsdtar, System32\tar.exe) are only
+ * the fallback for archives it does not handle (the bzip2 case below). If that fallback cannot run, that case is
+ * reported as SKIPPED, unless AIMLESS_TEST_REQUIRE_ZIP=1 is set (then it is a failure).
  * Hidden mode: `test_plat --child ...` is the helper process used by the plat_run tests. */
 #include "../src/library.h"
 #include "../src/paths.h"
@@ -14,7 +15,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
+#include "zipdata.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -53,6 +58,20 @@ static long read_file(const char *p, char *buf, size_t cap) {
 }
 
 static int file_is(const char *p, const char *want) { char b[4096]; long n = read_file(p, b, sizeof b); return n == (long)strlen(want) && !memcmp(b, want, (size_t)n); }
+
+static int file_eq(const char *p, const void *want, size_t n) {   /* exact bytes, any size */
+    FILE *f = plat_fopen(p, "rb"); if (!f) return 0;
+    unsigned char *b = malloc(n + 2); if (!b) { fclose(f); return 0; }
+    size_t got = fread(b, 1, n + 1, f); fclose(f);
+    int ok = got == n && !memcmp(b, want, n);
+    free(b);
+    return ok;
+}
+
+static void lcg_bytes(unsigned char *o, size_t n, uint32_t seed) {   /* same generator as lcg() in tests/gen_zipdata.py */
+    uint32_t x = seed;
+    for (size_t i = 0; i < n; i++) { x = (x * 1103515245u + 12345u) & 0x7FFFFFFFu; o[i] = (unsigned char)('a' + (x >> 16) % 12); }
+}
 
 static int count_dir(const char *p, const char *want) {   /* number of entries; *want (if given) must be among them */
     PlatDir *d = plat_opendir(p); if (!d) return -1;
@@ -183,11 +202,42 @@ static void test_trees(void) {
     CHECK(plat_remove_tree(s) == 0);                                   /* already gone is fine */
 }
 
-/* helper process: `test_plat --child exit N` | `--child args A B C` (checks the quoting round trip) */
+#ifdef _WIN32
+/* main()'s argv is in the ANSI code page with MinGW ("\xe2\x9c\x93" or "\xe9\x9f\xb3\xe6\xa5\xbd" arrive as '?'), so the helper reads the real
+ * UTF-16 command line instead, the same way the parent wrote it */
+static char **utf8_args(int *argc) {
+    int n = 0; wchar_t **w = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (!w) return NULL;
+    char **a = calloc((size_t)n + 1, sizeof *a);
+    for (int i = 0; a && i < n; i++) {
+        int k = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, NULL, 0, NULL, NULL);
+        a[i] = malloc((size_t)(k > 0 ? k : 1));
+        if (!a[i] || k <= 0 || !WideCharToMultiByte(CP_UTF8, 0, w[i], -1, a[i], k, NULL, NULL)) return NULL;
+    }
+    LocalFree(w);
+    *argc = n;
+    return a;
+}
+#endif
+
+/* helper process: `test_plat --child exit N` | `--child args A B C D` (checks the quoting round trip) */
 static int child_main(int argc, char **argv) {
+#ifdef _WIN32
+    int wc = 0; char **wa = utf8_args(&wc);
+    if (!wa) return 98;
+    argc = wc; argv = wa;
+#endif
     if (argc >= 4 && !strcmp(argv[2], "exit")) return atoi(argv[3]);
-    if (argc == 7 && !strcmp(argv[2], "args")) {
-        return !strcmp(argv[3], "plain") && !strcmp(argv[4], "two words") && !strcmp(argv[5], "q\"uote\\") && !strcmp(argv[6], U_MUSICA " " U_CHECK) ? 0 : 9;
+    if (argc >= 3 && !strcmp(argv[2], "args")) {
+        const char *want[4] = { "plain", "two words", "q\"uote\\", U_MUSICA " " U_CHECK };
+        if (argc != 7) { fprintf(stderr, "child: got %d arguments, wanted 7\n", argc); return 9; }
+        int bad = 0;
+        for (int i = 0; i < 4; i++) if (strcmp(argv[3 + i], want[i])) {
+            bad = 1; fprintf(stderr, "child: argument %d differs, got %zu bytes:", i, strlen(argv[3 + i]));
+            for (const char *c = argv[3 + i]; *c; c++) fprintf(stderr, " %02x", (unsigned char)*c);
+            fputc('\n', stderr);
+        }
+        return bad ? 9 : 0;
     }
     return 99;
 }
@@ -231,6 +281,119 @@ static void test_extract(void) {
     write_file(fmt("%s/bad.zip", root), "not a zip", 9);
     CHECK(plat_extract_zip(fmt("%s/bad.zip", root), fmt("%s/x-out3", root)) != 0);
     CHECK(plat_remove_tree(o) == 0);
+}
+
+static int flip_bit(const char *path, long off) {
+    FILE *f = plat_fopen(path, "r+b"); if (!f) return -1;
+    int c = fseek(f, off, SEEK_SET) ? EOF : fgetc(f);
+    int rc = c == EOF || fseek(f, off, SEEK_SET) || fputc(c ^ 0x10, f) == EOF ? -1 : 0;
+    return (fclose(f) || rc) ? -1 : 0;
+}
+
+/* the built-in reader on archives made by Python/zlib (deflate: fixed + dynamic blocks, stored, directory entries,
+ * subfolders, backslash separators, UTF-8 names), then hostile and damaged archives, then the system-tool fallback */
+static void test_builtin_zip(void) {
+    puts("zip: built-in reader (deflate, subfolders, UTF-8 names, hostile and damaged archives, tool fallback)");
+    unsigned char mp3[6000]; lcg_bytes(mp3, sizeof mp3, 1);
+    const char *z = fmt("%s/defl " U_JP ".zip", root), *o = fmt("%s/defl-out " U_CHECK " " U_NTILDE, root);
+    CHECK(write_file(z, ZIP_OSZ, sizeof ZIP_OSZ) == 0);
+    CHECK(plat_extract_zip_builtin(z, o) == 0);
+    CHECK(file_is(fmt("%s/Artist - T" U_MUSICA " [Easy].osu", o), OSU));
+    CHECK(file_eq(fmt("%s/audio " U_JP ".mp3", o), mp3, sizeof mp3));
+    CHECK(file_is(fmt("%s/sub/inner " U_NTILDE ".txt", o), "hi") && file_is(fmt("%s/sub/dir " U_CHECK "/deep.txt", o), "deep"));
+    CHECK(file_is(fmt("%s/Back/slash.txt", o), "bs"));                       /* "Back\slash.txt" is a file in a folder on every OS */
+    PlatStat st;
+    CHECK(plat_stat(fmt("%s/sub", o), &st) == 0 && st.is_dir);
+    const char *o2 = fmt("%s/defl-out2 " U_JP, root);                         /* the public entry point takes the same path */
+    CHECK(plat_extract_zip(z, o2) == 0 && file_eq(fmt("%s/audio " U_JP ".mp3", o2), mp3, sizeof mp3));
+    CHECK(plat_extract_zip_builtin(z, o) == 0);                               /* extracting over an existing tree */
+
+    {   /* a match 25000 bytes back (distance symbol 29) */
+        unsigned char far_[28000]; lcg_bytes(far_, 3000, 3); memset(far_ + 3000, 0, 22000); lcg_bytes(far_ + 25000, 3000, 3);
+        const char *fz = fmt("%s/far.zip", root), *fo = fmt("%s/far-out", root);
+        CHECK(write_file(fz, ZIP_FAR, sizeof ZIP_FAR) == 0 && plat_extract_zip_builtin(fz, fo) == 0 && file_eq(fmt("%s/far.bin", fo), far_, sizeof far_));
+    }
+
+    /* stored archive with UTF-8 names (the writer in this file), directly through the built-in reader */
+    ZEnt se[] = { { "Artist - T" U_MUSICA " [Easy].osu", "OSU" }, { "audio " U_JP ".mp3", "MP3\r\n" }, { "sub/inner " U_NTILDE ".txt", "in" }, { "./dot.txt", "d" } };
+    const char *sz = fmt("%s/stored " U_CHECK ".zip", root), *so = fmt("%s/stored-out " U_JP, root);
+    CHECK(make_zip(sz, se, 4) == 0 && plat_extract_zip_builtin(sz, so) == 0);
+    CHECK(file_is(fmt("%s/audio " U_JP ".mp3", so), "MP3\r\n") && file_is(fmt("%s/sub/inner " U_NTILDE ".txt", so), "in") && file_is(fmt("%s/dot.txt", so), "d"));
+
+    /* hostile names: refused (-2), nothing at all is written, not even the harmless entry before the bad one */
+    static const char *bad[] = { "../evil.txt", "sub/../../evil.txt", "..\\evil.txt", "/abs-evil.txt", "a/../b.txt" };
+    for (int i = 0; i < 5; i++) {
+        ZEnt he[] = { { "ok.txt", "ok" }, { bad[i], "x" } };
+        const char *hz = fmt("%s/hostile%d.zip", root, i), *ho = fmt("%s/hostile-out%d", root, i);
+        CHECK(make_zip(hz, he, 2) == 0 && plat_extract_zip_builtin(hz, ho) == -2);
+        CHECK(!plat_exists(fmt("%s/ok.txt", ho)) && !plat_exists(fmt("%s/evil.txt", root)) && !plat_exists("/abs-evil.txt"));
+        CHECK(plat_extract_zip(hz, fmt("%s/hostile-fb%d", root, i)) != 0);     /* and the system tools are not asked */
+    }
+
+    /* damaged archives: never accepted with wrong data, never a crash (run this under ASan/UBSan too) */
+    size_t nl1 = strlen("Artist - T" U_MUSICA " [Easy].osu");
+    unsigned cs1 = (unsigned)(ZIP_OSZ[18] | ZIP_OSZ[19] << 8);                /* compressed size of the first entry, from its local header */
+    const char *dz = fmt("%s/damaged.zip", root), *dd = fmt("%s/damaged-out", root);
+    int flips = 0, accepted_wrong = 0;
+    for (long off = (long)(30 + nl1); off < (long)(30 + nl1 + cs1); off += 3) {
+        CHECK(write_file(dz, ZIP_OSZ, sizeof ZIP_OSZ) == 0 && flip_bit(dz, off) == 0);
+        flips++;
+        if (plat_extract_zip_builtin(dz, dd) == 0 && !file_is(fmt("%s/Artist - T" U_MUSICA " [Easy].osu", dd), OSU)) accepted_wrong++;
+        plat_remove_tree(dd);
+    }
+    CHECK(flips > 20 && accepted_wrong == 0);
+    {   /* a flip inside the stored entry's data must be caught by the CRC */
+        size_t pos = 0; for (size_t i = 0; i + 12 < sizeof ZIP_OSZ; i++) if (!memcmp(ZIP_OSZ + i, "deep.txtdeep", 12)) { pos = i + 8; break; }   /* local header name, then the stored bytes */
+        CHECK(pos && write_file(dz, ZIP_OSZ, sizeof ZIP_OSZ) == 0 && flip_bit(dz, (long)pos) == 0 && plat_extract_zip_builtin(dz, dd) == -1);
+        plat_remove_tree(dd);
+    }
+    static const size_t cuts[] = { 0, 10, 21, 60, 2000, 4151 };
+    for (size_t i = 0; i < sizeof cuts / sizeof *cuts; i++) {
+        CHECK(write_file(dz, ZIP_OSZ, cuts[i]) == 0 && plat_extract_zip_builtin(dz, dd) != 0);
+        plat_remove_tree(dd);
+    }
+    write_file(dz, "not a zip at all, but longer than a zip header is", 50);
+    CHECK(plat_extract_zip_builtin(dz, dd) == -1 && plat_extract_zip_builtin(fmt("%s/no-such.zip", root), dd) == -1);
+
+    /* bzip2 member (method 12): the built-in reader says "unsupported", the system tool has to do it (ASCII paths) */
+    const char *bz = fmt("%s/bz.zip", root), *bo = fmt("%s/fb-out", root);
+    CHECK(write_file(bz, ZIP_BZ, sizeof ZIP_BZ) == 0 && plat_extract_zip_builtin(bz, fmt("%s/bz-builtin", root)) == 1);
+    int rc = plat_extract_zip(bz, bo);
+    if (rc == 0) CHECK(file_is(fmt("%s/bz.txt", bo), "bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 bzip2 "));
+    else {
+        const char *req = getenv("AIMLESS_TEST_REQUIRE_ZIP");
+        if (req && *req == '1') { checks++; fails++; puts("  FAIL: system tool fallback (bzip2 member) did not work (AIMLESS_TEST_REQUIRE_ZIP=1)"); }
+        else { puts("  SKIPPED: system tool fallback (bzip2 member) did not work"); skipped++; }
+    }
+}
+
+static void test_import_deflate(void) {
+    puts("import: deflate .osz / .osk with UTF-8 names and subfolders");
+    char msg[300], dest[1100];
+    unsigned char mp3[6000]; lcg_bytes(mp3, sizeof mp3, 1);
+    Library lib;
+    lib_scan(&lib, "", NULL, NULL); int before = lib.n; lib_free(&lib);
+    const char *osz = fmt("%s/3 Artist - Tdeflate " U_CHECK ".osz", root);
+    CHECK(write_file(osz, ZIP_OSZ, sizeof ZIP_OSZ) == 0);
+    int rc = import_path_ex(osz, msg, sizeof msg, dest, sizeof dest);
+    printf("  -> %s\n", msg);
+    CHECK(rc == 0 && strstr(dest, "/Songs/3 Artist - Tdeflate " U_CHECK) && strstr(msg, "imported song"));
+    CHECK(file_eq(fmt("%s/audio " U_JP ".mp3", dest), mp3, sizeof mp3) && file_is(fmt("%s/Artist - T" U_MUSICA " [Easy].osu", dest), OSU));
+    CHECK(file_is(fmt("%s/sub/inner " U_NTILDE ".txt", dest), "hi") && file_is(fmt("%s/sub/dir " U_CHECK "/deep.txt", dest), "deep"));
+    lib_scan(&lib, "", NULL, NULL);
+    CHECK(lib.n == before + 1);
+    lib_free(&lib);
+
+    const char *osk = fmt("%s/Deflate Skin " U_CHECK ".osk", root);
+    unsigned char hc[3000]; lcg_bytes(hc, sizeof hc, 7);
+    unsigned char dg[100]; memset(dg, 'd', 50); memset(dg + 50, 'e', 50);
+    char arg[1100];
+    CHECK(write_file(osk, ZIP_OSK, sizeof ZIP_OSK) == 0);
+    rc = import_path_ex(osk, msg, sizeof msg, dest, sizeof dest);
+    printf("  -> %s\n", msg);
+    CHECK(rc == 0 && strstr(dest, "/Skins/Deflate Skin " U_CHECK) && strstr(msg, "imported skin"));
+    CHECK(skinfs_resolve(dest, "hitcircle", ".png", arg, sizeof arg) && file_eq(arg, hc, sizeof hc));
+    CHECK(skinfs_resolve(dest, "Fonts/Hit/score-0", ".png", arg, sizeof arg) && file_eq(arg, dg, sizeof dg));   /* backslash member = sub-folder file */
 }
 
 static void test_import_songs(void) {
@@ -355,8 +518,10 @@ int main(int argc, char **argv) {
     apos = 0; test_trees();
     apos = 0; test_run();
     apos = 0; test_extract();
+    apos = 0; test_builtin_zip();
     apos = 0; test_import_songs();
     apos = 0; test_import_skins();
+    apos = 0; test_import_deflate();
 
     plat_remove_tree(root);
     CHECK(!plat_exists(root));

@@ -53,9 +53,15 @@ void        plat_closedir(PlatDir *d);
 /* run argv[0] with arguments, wait; returns the exit status (0..255), 127 if it could not be found/started,
  * or -1 if it was killed */
 int plat_run(char *const argv[]);
-/* Extract a .zip into dest (created if needed); the archive is only read. 0 on success. POSIX: unzip, then
- * bsdtar. Windows: the system tar.exe (System32), then bsdtar/unzip on PATH. */
+/* Extract a .zip into dest (created if needed); the archive is only read. 0 on success. Uses the built-in reader
+ * first (stored + deflate, UTF-8 names, no external tool, no locale or command-line encoding involved); only if
+ * that cannot handle the archive (zip64, encryption, other methods, entries over 1 GiB, not readable as a zip) it
+ * falls back to the system tools. POSIX: unzip, then bsdtar. Windows: System32 tar.exe, then bsdtar/unzip on PATH.
+ * Member names with ".." or an absolute path are refused outright. */
 int plat_extract_zip(const char *zip, const char *dest);
+/* The built-in reader alone (no fallback). 0 ok, 1 unsupported archive (zip64, encrypted, method other than
+ * stored/deflate, huge entry), -2 unsafe member name, -1 anything else (unreadable, corrupt, bad CRC, write error). */
+int plat_extract_zip_builtin(const char *zip, const char *dest);
 
 /* ---- fonts ---- */
 /* Path of a usable sans font (bold or regular). POSIX: fc-match with `pattern` (fontconfig syntax), then known
