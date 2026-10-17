@@ -40,6 +40,13 @@ int main(int argc, char **argv) {
     settings_clamp(&st);
     if (!had_settings) settings_save(&st); /* write a commented template so it is discoverable */
 
+    char skin_path[1024] = "", skin_msg[256];
+    if (map && *skin) {
+        if (resolve_skin_arg(skin, st.skins_extra, skin_path, sizeof skin_path, skin_msg, sizeof skin_msg))
+            fprintf(stderr, "skin: %s, using the built-in skin\n", skin_msg);
+        else if (skin_msg[0]) fprintf(stderr, "%s\n", skin_msg);
+    }
+
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "1");
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) { fprintf(stderr, "%s\n", SDL_GetError()); return 1; }
@@ -54,7 +61,7 @@ int main(int argc, char **argv) {
     SDL_ShowCursor(SDL_DISABLE);
 
     int quit = 0;
-    if (map) quit = game_play(win, ren, map, skin, &st);
+    if (map) quit = game_play(win, ren, map, skin_path, &st);
     else {
         SDL_ShowCursor(SDL_ENABLE);
         char mp[1024], sp[1024];

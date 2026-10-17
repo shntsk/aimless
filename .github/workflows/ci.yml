@@ -13,4 +13,5 @@ jobs:
         run: pacman -Syu --noconfirm --needed base-devel git sdl2 sdl2_image sdl2_mixer sdl2_ttf unzip fontconfig
       - uses: actions/checkout@v4
       - run: make
+      - run: make test
       - run: ./aimless 2>&1 | head -1 || true

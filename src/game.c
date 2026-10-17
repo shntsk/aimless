@@ -4,6 +4,8 @@
 #include "font.h"
 #include <SDL_image.h>
 #include "skin.h"
+#include "circlegeom.h"
+#include "numlayout.h"
 #include <SDL_mixer.h>
 #include <math.h>
 #include <stdio.h>
@@ -20,16 +22,45 @@ static void draw_tex(SDL_Renderer *ren, Tex *t, float cx, float cy, float w, flo
     SDL_RenderCopyF(ren, t->t, NULL, &d);
 }
 
-static float draw_num(SDL_Renderer *ren, Tex *set, const char *str, float x, float y, float sc, int center, int alpha) {
-    float tw = 0;
-    for (const char *c = str; *c; c++) if (*c >= '0' && *c <= '9') tw += set[*c - '0'].w * sc;
+/* A run of digits from set[]. overlap is in the sprites' logical px and is scaled with them (see numlayout.h);
+ * the HUD passes 0. Returns the x where the run ends. */
+static float draw_num(SDL_Renderer *ren, Tex *set, const char *str, float x, float y, float sc, int center, int alpha, float overlap) {
+    float w[64]; Tex *tx[64]; float left[64]; int n = 0;
+    for (const char *c = str; *c && n < 64; c++) if (*c >= '0' && *c <= '9') { tx[n] = &set[*c - '0']; w[n] = (float)tx[n]->w; n++; }
+    float tw = nl_layout(w, n, overlap, sc, left);
     if (center) x -= tw / 2;
-    for (const char *c = str; *c; c++) if (*c >= '0' && *c <= '9') {
-        Tex *t = &set[*c - '0'];
-        draw_tex(ren, t, x + t->w * sc / 2, y, t->w * sc, t->h * sc, alpha);
-        x += t->w * sc;
+    for (int i = 0; i < n; i++)
+        draw_tex(ren, tx[i], x + left[i] + tx[i]->w * sc / 2, y, tx[i]->w * sc, tx[i]->h * sc, alpha);
+    return x + tw;
+}
+
+/* Hit circle head: base, number and overlay in the order the skin asks for (cg_layers). Every sprite keeps
+ * its own proportions (see circlegeom.h). The colour mod is set per draw and the overlay is never tinted. */
+static void draw_circle_head(SDL_Renderer *ren, Skin *sk, const Uint8 *c, float px, float py, float d, float s, int num, int alpha) {
+    float k = cg_k(d, sk->hitcircle.w);
+    int order[3]; cg_layers(sk->overlay_above_number, order);
+    for (int i = 0; i < 3; i++) {
+        if (order[i] == CG_BASE) {
+            SDL_SetTextureColorMod(sk->hitcircle.t, c[0], c[1], c[2]);
+            draw_tex(ren, &sk->hitcircle, px, py, sk->hitcircle.w * k, sk->hitcircle.h * k, alpha);
+        } else if (order[i] == CG_OVERLAY) {
+            if (sk->overlay.t) SDL_SetTextureColorMod(sk->overlay.t, 255, 255, 255);
+            draw_tex(ren, &sk->overlay, px, py, sk->overlay.w * k, sk->overlay.h * k, alpha);
+        } else {
+            char nb[16]; snprintf(nb, sizeof nb, "%d", num);
+            /* image digits are drawn at the same factor as the circle sprites (they are authored on the same
+             * canvas); digits made from the TTF fallback have no logical size and keep the legacy 0.9 * s */
+            float ns = sk->digit_img ? k : s * NL_LEGACY_SCALE;
+            draw_num(ren, sk->digit, nb, px, py, ns, 1, alpha, (float)sk->hitcircle_overlap);
+        }
     }
-    return x;
+}
+
+/* approach circle: drawn in its own pass above every circle on screen; 4x -> 1x of its natural size */
+static void draw_approach(SDL_Renderer *ren, Skin *sk, const Uint8 *c, float px, float py, float d, float prog, int alpha) {
+    float k = cg_k(d, sk->hitcircle.w) * cg_approach(prog);
+    SDL_SetTextureColorMod(sk->approach.t, c[0], c[1], c[2]);
+    draw_tex(ren, &sk->approach, px, py, sk->approach.w * k, sk->approach.h * k, alpha);
 }
 
 static SDL_Texture *load_bg(SDL_Renderer *ren, const Beatmap *bm, int *w, int *h) {
@@ -131,13 +162,15 @@ static void draw_slider(SDL_Renderer *ren, Skin *sk, Obj *o, double t, float s, 
     /* end circle */
     float ex = ox + o->path[(o->npath - 1) * 2] * s, ey = oy + o->path[(o->npath - 1) * 2 + 1] * s;
     if (sk->endcircle.t) {
+        /* a fully transparent sliderendcircle is the skin's choice and stays invisible; otherwise tint like the head */
+        SDL_SetTextureColorMod(sk->endcircle.t, c[0], c[1], c[2]);
         draw_tex(ren, &sk->endcircle, ex, ey, d, d, a);
         if (sk->endoverlay.t) draw_tex(ren, &sk->endoverlay, ex, ey, d, d, a);
-        else draw_tex(ren, &sk->overlay, ex, ey, d, d, a);
+        else draw_tex(ren, &sk->overlay, ex, ey, sk->overlay.w * kk, sk->overlay.h * kk, a);
     } else {
         SDL_SetTextureColorMod(sk->hitcircle.t, c[0] * 6 / 10, c[1] * 6 / 10, c[2] * 6 / 10);
-        draw_tex(ren, &sk->hitcircle, ex, ey, d, d, a);
-        draw_tex(ren, &sk->overlay, ex, ey, d, d, a);
+        draw_tex(ren, &sk->hitcircle, ex, ey, sk->hitcircle.w * kk, sk->hitcircle.h * kk, a);
+        draw_tex(ren, &sk->overlay, ex, ey, sk->overlay.w * kk, sk->overlay.h * kk, a);
     }
 
     /* reverse arrows at the next (up to two) turning points */
@@ -160,7 +193,8 @@ static void draw_slider(SDL_Renderer *ren, Skin *sk, Obj *o, double t, float s, 
         float fs = (o->trk ? 1.0f : 0.7f) * (0.5f + 0.5f * grow);
         draw_tex(ren, &sk->follow, bx, by, sk->follow.w * kk * fs, sk->follow.h * kk * fs, o->trk ? 255 : 130);
         Tex *bl = &sk->sliderb[((int)(t / 30)) % sk->n_sliderb];
-        SDL_SetTextureColorMod(bl->t, 255, 255, 255);
+        if (sk->ball_tint) SDL_SetTextureColorMod(bl->t, c[0], c[1], c[2]);
+        else SDL_SetTextureColorMod(bl->t, 255, 255, 255);
         draw_tex(ren, bl, bx, by, bl->w * kk, bl->h * kk, 255);
     }
 }
@@ -368,17 +402,16 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
             float fade = fminf(1, (t - (o->time - preempt)) / fminf(400, preempt));
             int a = (int)(fade * 255);
             Uint8 *c = sk.combo[o->color % sk.n_combo];
-            SDL_SetTextureColorMod(sk.hitcircle.t, c[0], c[1], c[2]);
-            draw_tex(ren, &sk.hitcircle, px, py, d, d, a);
-            draw_tex(ren, &sk.overlay, px, py, d, d, a);
-            char nb[16]; snprintf(nb, sizeof nb, "%d", o->num);
-            draw_num(ren, sk.digit, nb, px, py, s * 0.9f, 1, a);
+            draw_circle_head(ren, &sk, c, px, py, d, s, o->num, a);
+        }
+        /* approach circles last, above every circle (earlier objects on top, like the circles themselves) */
+        for (int i = hi - 1; i >= first && i >= 0; i--) {
+            Obj *o = &bm.objs[i];
+            if (o->state) continue;                       /* head already hit or missed */
             float prog = (t - (o->time - preempt)) / preempt;
-            if (prog < 1) {
-                SDL_SetTextureColorMod(sk.approach.t, c[0], c[1], c[2]);
-                float ad = d * (1 + 3 * (1 - prog));
-                draw_tex(ren, &sk.approach, px, py, ad, ad, a);
-            }
+            if (prog >= 1) continue;
+            float fade = fminf(1, (t - (o->time - preempt)) / fminf(400, preempt));
+            draw_approach(ren, &sk, sk.combo[o->color % sk.n_combo], ox + o->x * s, oy + o->y * s, rad * 2 * s * 1.05f, prog, (int)(fade * 255));
         }
 
         if (st->hit_lighting) { /* additive flash, grows and fades */
@@ -412,7 +445,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
         float us = H / 768.0f; char buf[96];
         if (st->show_score) {
             snprintf(buf, sizeof buf, "%08d", (int)score);
-            draw_num(ren, sk.score, buf, W - 180 * us, 28 * us, us, 1, 255);
+            draw_num(ren, sk.score, buf, W - 180 * us, 28 * us, us, 1, 255, 0);
         }
         if (st->show_acc) {
             int tot = hits[0] + hits[1] + hits[2] + hits[3];
@@ -425,7 +458,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
             float pop = 1 + 0.3f * fmaxf(0, 1 - (float)(t - pop_t) / 160);
             snprintf(buf, sizeof buf, "%d", combo);
             float bx = 10 * us, by = H - 40 * us * pop;
-            float ex = draw_num(ren, sk.score, buf, bx, by, us * pop, 0, 255);
+            float ex = draw_num(ren, sk.score, buf, bx, by, us * pop, 0, 255, 0);
             if (sk.score_x.t) draw_tex(ren, &sk.score_x, ex + sk.score_x.w * us / 2, by, sk.score_x.w * us * pop, sk.score_x.h * us * pop, 255);
         }
         int hy = 8;

@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "skinfs.h"
 #include <SDL.h>
 #include <SDL_mixer.h>
 #include <math.h>
@@ -19,14 +20,16 @@ static int ncache, next_ch;
 static Mix_Chunk *gen[NK], *miss_c, *miss_gen;
 static Sint16 *gen_buf[NK], *miss_buf;
 
+/* "<dir>/<base>.wav|ogg|mp3", matched ignoring case (skins come from Windows); base may have sub-folders */
 static Mix_Chunk *try_name(const char *dir, const char *base) {
-    static const char *EXT[] = { "wav", "ogg", "mp3" };
-    char p[1300];
+    static const char *EXT[] = { ".wav", ".ogg", ".mp3" };
+    char p[1700];
     if (!dir || !*dir) return NULL;
     for (int i = 0; i < 3; i++) {
-        snprintf(p, sizeof p, "%s/%s.%s", dir, base, EXT[i]);
+        if (!skinfs_resolve(dir, base, EXT[i], p, sizeof p)) continue;
         Mix_Chunk *c = Mix_LoadWAV(p);
         if (c) { if (getenv("AIMLESS_SFXLOG")) fprintf(stderr, "sample: %s\n", p); return c; }
+        fprintf(stderr, "skin: cannot decode %s: %s\n", p, Mix_GetError());
     }
     return NULL;
 }

@@ -81,11 +81,20 @@ A `packaging/PKGBUILD` is included for `makepkg -si`.
 ```sh
 aimless                              # song select
 aimless import pack.osz MySkin.osk   # import from the terminal
-aimless map.osu [skin_dir]           # play a map directly
+aimless map.osu [skin]               # play a map directly; skin = folder, .osk file, or name in Skins/
 ```
 Flags: `--no-silent`, `--assist=N` (radii; `0` = anywhere, `1` = normal), `--vsync`, `--songs=DIR`, `--skins=DIR`
 (point those at your osu!stable `Songs`/`Skins` folders to use them without copying).
 Data lives in `~/.local/share/aimless/{Songs,Skins}`. Keys: `Z`/`X`/mouse to hit, `Esc` back/quit.
+
+## Skins
+- **Import**: drop a `.osk` (or a skin folder) on the song-select window, or `aimless import MySkin.osk`. A `.osk` is extracted into `~/.local/share/aimless/Skins/<name>` through a hidden temp folder, so a broken archive installs nothing; the `.osk` is never modified, an already installed skin is never overwritten (the new one becomes `<name> (2)`), and an archive with a single wrapper folder is flattened. Needs `unzip` (or `bsdtar`).
+- **Lookup**: files are found ignoring case and with `/` or `\` separators, so Windows-made skins work on Linux. Images: `name@2x.png`, `name@2x.jpg`, `name.png`, `name.jpg`; sounds: `.wav`, `.ogg`, `.mp3`. A missing or undecodable file falls back per element; a file that exists but is fully transparent is kept transparent.
+- **Circle sprites**: `hitcircle`, `hitcircleoverlay` and `approachcircle` each pick their own `@2x`/1x file and are drawn at their own logical size (pixels / 2 for `@2x`), scaled by the factor that maps the hitcircle to the circle diameter, so mixed 1x/2x skins and non-square or oversized sprites keep their proportions. Approach circles are drawn above all circles. `HitCircleOverlayAboveNumber` (also the common misspelling `...Numer`) sets whether the overlay is over the number (default yes).
+- **skin.ini**: BOM, CRLF, indentation, `//` comments, `[Sections]` and `Key: Value` in any spacing are handled. Read today: `Combo1-8`, `SliderBorder`, `SliderTrackOverride`, `AllowSliderBallTint`, `Name`, `HitCirclePrefix` / `HitCircleOverlap` (circle numbers, below); `ScorePrefix`, `ComboPrefix` and their overlaps are parsed but not used yet.
+- **Circle numbers**: digit `d` is the image `<HitCirclePrefix>-d` (default prefix `default`; sub-folders such as `fonts/hit/score` work, `@2x` preferred, case ignored). A digit whose file is missing falls back to `default-d`, then to a generated font digit. Each digit keeps its own width; `HitCircleOverlap` (logical px, may be negative) is how far the next digit is pulled back over the previous one. Image digits are scaled with the same factor as the circle sprites; generated digits keep the old fixed size.
+- `AIMLESS_SKINLOG=1` prints every skin image that gets loaded, `AIMLESS_SFXLOG=1` every sample.
+- `make test` runs the SDL-free tests (parser, lookup, import); `make test OSK=/path/skin.osk` adds a real skin.
 
 ## Releases
 Push a tag like `v0.1.0` and the `release` workflow builds on Arch Linux and attaches `aimless-v0.1.0-x86_64-arch.tar.gz` (+ sha256) to a GitHub Release.
@@ -105,6 +114,9 @@ src/gfx.c       rounded rects, circles, cached text for the menus
 src/paths.c     data dirs, import (.osz/.osk)
 src/beatmap.c   .osu parser (metadata, timing points, hit objects)
 src/skin.c      stable skin loader + fallbacks
+src/skinfs.c    case-insensitive skin file lookup (no SDL)
+src/skinini.c   skin.ini reader (no SDL)
+tests/          SDL-free tests for the above (make test)
 src/audio.c     hitsounds
 src/settings.c  settings.ini load/save
 src/font.c      TTF helpers + cached text
