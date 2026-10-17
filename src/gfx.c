@@ -1,4 +1,5 @@
 #include "gfx.h"
+#include "icons.h"
 #include "plat.h"
 #include <SDL_image.h>
 #include <SDL_ttf.h>
@@ -19,6 +20,42 @@ static char font_path[2][512];
 #define CACHE_N 600
 static struct { char *key; SDL_Texture *t; int w, h; } cache[CACHE_N];
 static int cache_n;
+
+/* icon textures: white coverage masks, tinted with colour-mod, rasterised once per (icon, px size, weight) */
+#define ICON_CACHE 96
+static struct { int icon, px, weight; SDL_Texture *t; } icache[ICON_CACHE];
+static int icache_n;
+
+static void icons_clear(void) {
+    for (int i = 0; i < icache_n; i++) if (icache[i].t) SDL_DestroyTexture(icache[i].t);
+    memset(icache, 0, sizeof icache); icache_n = 0;
+}
+
+void gfx_icon(int icon, float cx, float cy, float size, int weight, SDL_Color c) {
+    int px = (int)lroundf(size);
+    if (px < 4) return;
+    SDL_Texture *t = NULL;
+    for (int i = 0; i < icache_n; i++)
+        if (icache[i].icon == icon && icache[i].px == px && icache[i].weight == weight) { t = icache[i].t; break; }
+    if (!t) {
+        unsigned char *a = malloc((size_t)px * px);
+        SDL_Surface *s = a && px <= 256 ? SDL_CreateRGBSurfaceWithFormat(0, px, px, 32, SDL_PIXELFORMAT_RGBA32) : NULL;
+        if (s && !icon_raster(icon, px, weight, a)) {
+            Uint32 *d = s->pixels;
+            for (int i = 0; i < px * px; i++) d[i] = SDL_MapRGBA(s->format, 255, 255, 255, a[i]);
+            t = SDL_CreateTextureFromSurface(R, s);
+            if (t) { SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND); SDL_SetTextureScaleMode(t, SDL_ScaleModeLinear); }
+        }
+        if (s) SDL_FreeSurface(s);
+        free(a);
+        if (icache_n == ICON_CACHE) icons_clear();
+        icache[icache_n].icon = icon; icache[icache_n].px = px; icache[icache_n].weight = weight; icache[icache_n].t = t; icache_n++;
+    }
+    if (!t) return;
+    SDL_SetTextureColorMod(t, c.r, c.g, c.b); SDL_SetTextureAlphaMod(t, c.a);
+    SDL_FRect d = { roundf(cx - px / 2.0f), roundf(cy - px / 2.0f), (float)px, (float)px };
+    SDL_RenderCopyF(R, t, NULL, &d);
+}
 
 SDL_Renderer *gfx_ren(void) { return R; }
 SDL_Color gfx_alpha(SDL_Color c, int a) { c.a = (Uint8)a; return c; }
@@ -59,7 +96,7 @@ static void cache_clear(void) {
 }
 
 void gfx_quit(void) {
-    cache_clear();
+    cache_clear(); icons_clear();
     for (int b = 0; b < 2; b++) for (int i = 0; i < 80; i++) if (fonts[b][i]) { TTF_CloseFont(fonts[b][i]); fonts[b][i] = NULL; }
     if (disc) SDL_DestroyTexture(disc);
     if (inv) SDL_DestroyTexture(inv);

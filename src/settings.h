@@ -29,6 +29,7 @@ typedef struct {
     char  songs_extra[512];
     char  skins_extra[512];
     char  status[256];      /* last result / import message shown in the menu */
+    unsigned mods;          /* active gameplay mods (MOD_* in mods.h); chosen in the song select, kept for the session, not saved */
 } Settings;
 
 void settings_defaults(Settings *s);

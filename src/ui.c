@@ -3,6 +3,7 @@
 #include "beatmap.h"
 #include "gfx.h"
 #include "library.h"
+#include "mods.h"
 #include "paths.h"
 #include <SDL_image.h>
 #include <SDL_mixer.h>
@@ -77,11 +78,11 @@ static int w_stepper(float x, float y, float w, const char *label, const char *v
     gfx_text(label, x + 16, y + 14, 16, 0, C_LABEL, w * 0.3f, A_LEFT);
     float rx = x + w - 16;
     SDL_Color a = *idx > lo ? C_ACCENT : C_SEP, b = *idx < hi ? C_ACCENT : C_SEP;
-    gfx_text("\xe2\x80\xba", rx - 6, y + 11, 22, 1, b, 0, A_RIGHT);
+    gfx_icon(ICON_CHEVRON_RIGHT, rx - 10, y + RH / 2.0f, 16, 1, b);
     gfx_text(value, rx - 30, y + 14, 16, 0, C_LABEL2, w * 0.5f, A_RIGHT);
     float vw = gfx_text_w(value, 16, 0);
     if (vw > w * 0.5f) vw = w * 0.5f;
-    gfx_text("\xe2\x80\xb9", rx - 30 - vw - 12, y + 11, 22, 1, a, 0, A_RIGHT);
+    gfx_icon(ICON_CHEVRON_LEFT, rx - 30 - vw - 16, y + RH / 2.0f, 16, 1, a);
     if (in.pressed && over(rx - 44 - vw, y, vw + 52, RH)) {
         if (in.mx > rx - 30 - vw / 2 && *idx < hi) { (*idx)++; ch = 1; }
         else if (in.mx <= rx - 30 - vw / 2 && *idx > lo) { (*idx)--; ch = 1; }
@@ -89,7 +90,6 @@ static int w_stepper(float x, float y, float w, const char *label, const char *v
     return ch;
 }
 
-static void header(const char *t, float x, float y) { gfx_text(t, x + 16, y, 13, 0, C_LABEL2, 0, A_LEFT); }
 static void card(float x, float y, float w, float h) { gfx_rrect(x, y, w, h, 12, C_CELL); }
 
 /* ---------- state ---------- */
@@ -113,7 +113,9 @@ typedef struct {
     SDL_Texture *cover; int cw, ch;
     Mix_Music *pm; char pm_key[1100]; Uint32 pm_due; int pm_pending;
     int skin_sel;                               /* -1 = built-in */
-    int screen;                                 /* 0 select, 1 settings */
+    int screen;                                 /* 0 select, 1 settings side panel (drawn over the select screen) */
+    int mods_open;                              /* mods sheet (drawn over the select screen) */
+    int cat;                                    /* settings category shown */
     float sscroll, scontent, soft_r;
     int result, running;
 } Ctx;
@@ -331,8 +333,45 @@ static void preview_update(Ctx *c) {
 static void pill(float x, float y, float w, const char *label, const char *value, int *click) {
     gfx_rrect(x, y, w, 38, 11, C_CELL);
     float lw = gfx_text(label, x + 12, y + 10, 14, 0, C_LABEL2, 0, A_LEFT);
-    gfx_text(value, x + 12 + lw + 6, y + 10, 14, 1, C_ACCENT, w - lw - 30, A_LEFT);
+    gfx_text(value, x + 12 + lw + 6, y + 10, 14, 1, C_ACCENT, w - lw - 46, A_LEFT);
+    gfx_icon(ICON_CHEVRON_UPDOWN, x + w - 16, y + 19, 14, 0, C_LABEL2);   /* a click cycles to the next option */
     *click = in.pressed && over(x, y, w, 38);
+}
+
+/* icon + short text, e.g. a clock and "0:58"; returns the x where the next chip may start (x unchanged if it did not fit) */
+static float chip(int icon, const char *t, float x, float y, float maxx, SDL_Color col) {
+    float w = gfx_text_w(t, 12, 0);
+    if (x + 17 + w > maxx) return x;
+    gfx_icon(icon, x + 6.5f, y + 8, 13, 0, col);
+    gfx_text(t, x + 17, y, 12, 0, col, 0, A_LEFT);
+    return x + 17 + w + 14;
+}
+
+/* action bar button: icon + label (an optional count badge), highlighted while `active` */
+static int bar_button(float x, float y, float w, float h, int icon, const char *label, int active, int badge) {
+    int hot = over(x, y, w, h);
+    SDL_Color fg = active ? C_ACCENT : C_LABEL;
+    gfx_rrect(x, y, w, h, 14, active ? gfx_alpha(C_ACCENT, 60) : hot ? C_CELL2 : C_CELL);
+    float tw = gfx_text_w(label, 15, 1), sx = x + (w - (18 + 6 + tw)) / 2;
+    gfx_icon(icon, sx + 9, y + h / 2, 18, active ? 1 : 0, fg);
+    gfx_text(label, sx + 24, y + (h - 20) / 2, 15, 1, fg, w - 40, A_LEFT);
+    if (badge > 0) {
+        char t[16]; snprintf(t, sizeof t, "%d", badge);
+        gfx_circle(x + w - 12, y + 12, 9, C_ACCENT);
+        gfx_text(t, x + w - 12, y + 5, 11, 1, C_WHITE, 0, A_CENTER);
+    }
+    return in.pressed && hot;
+}
+
+/* the round start button (bottom right); disabled without a selected difficulty */
+static int play_button(float cx, float cy, float r, int enabled) {
+    float dx = in.mx - cx, dy = in.my - cy;
+    int hot = enabled && dx * dx + dy * dy <= r * r;
+    gfx_circle(cx, cy, r + (hot ? 5 : 3), gfx_alpha(enabled ? C_ACCENT : C_OFF, hot ? 90 : 55));
+    gfx_circle(cx, cy, r, enabled ? C_ACCENT : C_OFF);
+    gfx_circle(cx, cy, r - 7, gfx_alpha(C_WHITE, enabled ? 38 : 14));
+    gfx_icon(ICON_PLAY, cx + 3, cy, 36, 0, enabled ? C_WHITE : C_LABEL2);
+    return enabled && in.pressed && hot;
 }
 
 static void draw_select(Ctx *c, int W, int H) {
@@ -343,17 +382,16 @@ static void draw_select(Ctx *c, int W, int H) {
     gfx_text("aimless", lx, 18, 34, 1, C_LABEL, 0, A_LEFT);
     snprintf(b, sizeof b, "%d sets, %d difficulties", c->nvis_sets, c->nvis_diffs);
     gfx_text(b, lx + gfx_text_w("aimless", 34, 1) + 14, 32, 15, 0, C_LABEL2, 0, A_LEFT);
-    float bx = W - 24 - 104, by = 24; /* settings pill */
-    gfx_rrect(bx, by, 104, 34, 17, gfx_alpha(C_ACCENT, 50));
-    gfx_text("Settings", bx + 52, by + 7, 16, 1, C_ACCENT, 0, A_CENTER);
-    if (in.pressed && over(bx, by, 104, 34)) c->screen = 1;
-
     /* search + sort + group */
     float pw = 168, sy = 74, sw = rw - 2 * pw - 16;
     if (sw < 120) sw = 120;
     gfx_rrect(rx, sy, sw, 38, 11, C_CELL);
-    if (c->qtext[0]) gfx_text(c->qtext, rx + 14, sy + 9, 16, 0, C_LABEL, sw - 28, A_LEFT);
-    else gfx_text("Search, or filter: stars>5 bpm>180", rx + 14, sy + 10, 14, 0, C_LABEL2, sw - 28, A_LEFT);
+    gfx_icon(ICON_SEARCH, rx + 22, sy + 19, 16, 0, C_LABEL2);
+    if (c->qtext[0]) {
+        gfx_text(c->qtext, rx + 40, sy + 9, 16, 0, C_LABEL, sw - 76, A_LEFT);
+        gfx_icon(ICON_XMARK_CIRCLE, rx + sw - 22, sy + 19, 17, 0, C_LABEL2);
+        if (in.pressed && over(rx + sw - 36, sy, 36, 38)) { c->qtext[0] = 0; refilter(c); }
+    } else gfx_text("Search, or filter: stars>5 bpm>180", rx + 40, sy + 10, 14, 0, C_LABEL2, sw - 52, A_LEFT);
     int ck;
     pill(rx + sw + 8, sy, pw, "Sort", SORT_NAMES[st->sort_mode], &ck);
     if (ck) { st->sort_mode = (st->sort_mode + 1) % SORT_N; resort(c); }
@@ -361,7 +399,8 @@ static void draw_select(Ctx *c, int W, int H) {
     if (ck) { st->group_mode = (st->group_mode + 1) % GROUP_N; resort(c); }
 
     /* ---- carousel ---- */
-    float ly = 124, lh = H - ly - 24;
+    float bot = H - 116;                       /* the action bar and the round start button live below this line */
+    float ly = 124, lh = bot - ly;
     SDL_Rect clip = { (int)rx - 4, (int)ly, (int)rw + 8, (int)lh };
     SDL_RenderSetClipRect(c->ren, &clip);
     float c0 = in.clip0, c1 = in.clip1; in.clip0 = ly; in.clip1 = ly + lh;
@@ -392,6 +431,7 @@ static void draw_select(Ctx *c, int W, int H) {
     }
     c->scroll = clampf(c->scroll, 0, maxs);
 
+    int act_set = -1, act_diff = -1, act_play = 0;   /* applied after the loop: rebuild() must not run while rows are being drawn */
     for (int i = 0; i < c->nrows; i++) {
         Row *r = &c->rows[i];
         float y = ly + r->y - c->scroll;
@@ -418,17 +458,27 @@ static void draw_select(Ctx *c, int W, int H) {
             float x0 = tx + 124, mw = rw - (x0 - rx) - 110;
             gfx_text(s->d[0].mi.title, x0, y + 12, 16, 1, C_LABEL, mw, A_LEFT);
             gfx_text(s->d[0].mi.artist, x0, y + 36, 13, 0, C_LABEL2, mw, A_LEFT);
-            snprintf(b, sizeof b, "mapped by %s", s->d[0].mi.creator);
-            gfx_text(b, x0, y + 56, 12, 0, C_LABEL2, mw, A_LEFT);
+            /* mapper, length and BPM: only what the library really has. Unselected sets show their first difficulty */
+            { float cx = x0, maxx = x0 + mw;
+              if (s->d[0].mi.creator[0]) {
+                  float cw = gfx_text_w(s->d[0].mi.creator, 12, 0), room = mw - 130;
+                  if (cw > room) cw = room > 60 ? room : 60;
+                  gfx_icon(ICON_PERSON, cx + 6.5f, y + 64, 13, 0, C_LABEL2);
+                  gfx_text(s->d[0].mi.creator, cx + 17, y + 56, 12, 0, C_LABEL2, cw, A_LEFT);
+                  cx += 17 + cw + 14;
+              }
+              const MapInfo *sm = sel && cur_diff(c) ? &cur_diff(c)->mi : &s->d[0].mi;   /* selected set: the chosen difficulty */
+              if (sm->length_ms > 0) { int sec = sm->length_ms / 1000; snprintf(b, sizeof b, "%d:%02d", sec / 60, sec % 60); cx = chip(ICON_CLOCK, b, cx, y + 56, maxx, C_LABEL2); }
+              if (sm->bpm > 0) { snprintf(b, sizeof b, "%d", sm->bpm); chip(ICON_METRONOME, b, cx, y + 56, maxx, C_LABEL2); } }
             /* difficulty spectrum dots + star range */
             int nd = s->nd > 10 ? 10 : s->nd;
             for (int j = 0; j < nd; j++) gfx_circle(rx + rw - 18 - j * 13, y + ch - 20, 4.5f, star_color(s->d[s->nd - 1 - j].mi.stars));
             snprintf(b, sizeof b, "%.1f - %.1f", s->smin, s->smax);
             gfx_text(b, rx + rw - 16, y + 14, 12, 0, C_LABEL2, 0, A_RIGHT);
             gfx_star(rx + rw - 22 - gfx_text_w(b, 12, 0), y + 22, 5, C_LABEL2);
-            if (in.pressed && over(rx, y, rw, ch)) {
-                if (r->a != c->sel_set) select_set(c, r->a);
-                else if (c->dbl) commit_play(c);
+            if (in.pressed && over(rx, y, rw, ch) && act_set < 0 && act_diff < 0 && !act_play) {
+                if (r->a != c->sel_set) act_set = r->a;
+                if (c->dbl) act_play = 1;           /* double click on a set: select it and start its chosen difficulty */
             }
         } else {
             int sel = r->a == c->sel_set && r->b == c->sel_diff;
@@ -449,23 +499,30 @@ static void draw_select(Ctx *c, int W, int H) {
             gfx_star(px + 17, py + 13.5f, 6, tc);
             snprintf(b, sizeof b, "%.2f", d->mi.stars);
             gfx_text(b, px + 29, py + 5, 14, 1, tc, 0, A_LEFT);
-            if (in.pressed && over(dx, y, dw, dh)) {
-                if (sel) commit_play(c); else select_diff(c, r->b);
+            if (in.pressed && over(dx, y, dw, dh) && act_set < 0 && act_diff < 0 && !act_play) {
+                act_diff = r->b;                    /* first click selects this difficulty ... */
+                if (sel || c->dbl) act_play = 1;    /* ... clicking the selected one again, or a double click, starts it */
             }
         }
     }
     if (!c->lib.n) gfx_text("No beatmaps yet. Drop a .osz onto the window, or set songs_dir in settings.ini", rx + rw / 2, ly + 30, 15, 0, C_LABEL2, rw - 40, A_CENTER);
-    else if (!c->nvis_sets) gfx_text("No matches", rx + rw / 2, ly + 30, 15, 0, C_LABEL2, rw - 40, A_CENTER);
+    else if (!c->nvis_sets) {
+        gfx_icon(ICON_SEARCH, rx + rw / 2, ly + 44, 30, 0, C_LABEL2);
+        gfx_text("No matches", rx + rw / 2, ly + 72, 15, 0, C_LABEL2, rw - 40, A_CENTER);
+    }
     SDL_RenderSetClipRect(c->ren, NULL);
     in.clip0 = c0; in.clip1 = c1;
+    if (act_set >= 0) select_set(c, act_set);
+    if (act_diff >= 0) select_diff(c, act_diff);
+    if (act_play) commit_play(c);                   /* always the difficulty that is selected right now */
 
-    /* ---- details wedge ---- */
-    float dy = 74, dh = H - dy - 24;
+    /* ---- info panel (fixed, follows the selected set and difficulty) ---- */
+    float dy = 74, dh = bot - dy;
     gfx_rrect(lx, dy, lw, dh, 14, C_CELL);
     SDL_Rect dclip = { (int)lx, (int)dy, (int)lw, (int)dh };
     SDL_RenderSetClipRect(c->ren, &dclip);
     MapSet *s = cur_set(c); Diff *df = cur_diff(c);
-    float ix = lx + 16, iw = lw - 32, ih = floorf(fminf(iw * 9 / 16, dh * 0.30f)), y = dy + 16;
+    float ix = lx + 16, iw = lw - 32, ih = floorf(fminf(iw * 9 / 16, dh * 0.26f)), y = dy + 16;
     if (c->cover) {
         SDL_Rect cr = { (int)ix, (int)y, (int)iw, (int)ih };
         SDL_RenderSetClipRect(c->ren, &cr);
@@ -482,148 +539,255 @@ static void draw_select(Ctx *c, int W, int H) {
         const MapInfo *m = &df->mi; SDL_Color col = star_color(m->stars);
         gfx_text(m->title, ix, y, 21, 1, C_LABEL, iw, A_LEFT); y += 28;
         gfx_text(m->artist, ix, y, 15, 0, C_LABEL2, iw, A_LEFT); y += 22;
-        snprintf(b, sizeof b, "mapped by %s", m->creator);
-        gfx_text(b, ix, y, 12, 0, C_LABEL2, iw, A_LEFT); y += 24;
-        /* difficulty name + stars */
-        float nw = gfx_text_w(m->version, 13, 1) + 22; if (nw > iw - 100) nw = iw - 100;
+        if (m->creator[0]) {
+            gfx_icon(ICON_PERSON, ix + 7, y + 8, 14, 0, C_LABEL2);
+            gfx_text(m->creator, ix + 20, y, 12, 0, C_LABEL2, iw - 20, A_LEFT);
+            y += 20;
+        }
+        if (m->source[0]) { gfx_text(m->source, ix, y, 12, 0, C_LABEL2, iw, A_LEFT); y += 18; }
+        y += 4;
+        /* difficulty name + stars, and a previous/next difficulty switcher (same as Left/Right) */
+        int nvd = s->nvd, pos = 0;
+        for (int j = 0; j < nvd; j++) if (s->vd[j] == c->sel_diff) pos = j;
+        float swr = 26 + 38 + 26;
+        float nw = gfx_text_w(m->version, 13, 1) + 22; if (nw > iw - swr - 76) nw = iw - swr - 76;
+        if (nw < 50) nw = 50;
         gfx_rrect(ix, y, nw, 26, 13, gfx_alpha(col, 70));
         gfx_text(m->version, ix + nw / 2, y + 5, 13, 1, C_LABEL, nw - 14, A_CENTER);
         gfx_star(ix + nw + 22, y + 13.5f, 7, col);
         snprintf(b, sizeof b, "%.2f", m->stars);
         gfx_text(b, ix + nw + 34, y + 3, 17, 1, col, 0, A_LEFT);
+        { float sx = ix + iw - swr;
+          int can_prev = pos > 0, can_next = pos < nvd - 1;
+          gfx_circle(sx + 13, y + 13, 13, C_CELL2); gfx_circle(sx + swr - 13, y + 13, 13, C_CELL2);
+          gfx_icon(ICON_CHEVRON_LEFT, sx + 12, y + 13, 13, 1, can_prev ? C_ACCENT : C_SEP);
+          gfx_icon(ICON_CHEVRON_RIGHT, sx + swr - 12, y + 13, 13, 1, can_next ? C_ACCENT : C_SEP);
+          snprintf(b, sizeof b, "%d/%d", pos + 1, nvd);
+          gfx_text(b, sx + swr / 2, y + 6, 12, 0, C_LABEL2, 0, A_CENTER);
+          if (in.pressed && can_prev && over(sx, y, 26, 26)) step_diff(c, -1);
+          if (in.pressed && can_next && over(sx + swr - 26, y, 26, 26)) step_diff(c, 1); }
         y += 36;
         gfx_rrect(ix, y, iw, 6, 3, C_SEG); gfx_rrect(ix, y, fmaxf(6, iw * fminf(m->stars / 10.0f, 1)), 6, 3, col);
-        gfx_text("estimated difficulty", ix, y + 10, 11, 0, C_LABEL2, iw, A_LEFT);
+        gfx_text(st->mods ? "estimated difficulty (not adjusted for mods)" : "estimated difficulty", ix, y + 10, 11, 0, C_LABEL2, iw, A_LEFT);
         y += 32;
-        const char *lab[4] = { "CS", "AR", "OD", "HP" }; float val[4] = { m->cs, m->ar, m->od, m->hp };
+        const char *lab[4] = { "CS", "AR", "OD", "HP" }; float val[4] = { m->cs, m->ar, m->od, m->hp }, base4[4] = { m->cs, m->ar, m->od, m->hp };
+        mods_adjust(st->mods, &val[0], &val[1], &val[2], &val[3]);   /* what the map will really use with the active mods */
         for (int i = 0; i < 4; i++) {
             gfx_text(lab[i], ix, y, 13, 0, C_LABEL2, 0, A_LEFT);
             float bx2 = ix + 34, bw = iw - 34 - 44;
             gfx_rrect(bx2, y + 6, bw, 5, 2.5f, C_SEG); gfx_rrect(bx2, y + 6, fmaxf(5, bw * clampf(val[i] / 10.0f, 0, 1)), 5, 2.5f, C_ACCENT);
-            snprintf(b, sizeof b, "%.1f", val[i]); gfx_text(b, ix + iw, y, 13, 1, C_LABEL, 0, A_RIGHT);
+            snprintf(b, sizeof b, "%.1f", val[i]); gfx_text(b, ix + iw, y, 13, 1, fabsf(val[i] - base4[i]) > 0.01f ? C_ACCENT : C_LABEL, 0, A_RIGHT);
             y += 22;
         }
         y += 6;
-        int len = m->length_ms / 1000;
-        snprintf(b, sizeof b, "BPM %d     %d:%02d     %d objects", m->bpm, len / 60, len % 60, m->nobj);
-        gfx_text(b, ix, y, 13, 0, C_LABEL, iw, A_LEFT); y += 20;
+        /* stat tiles: only the values this difficulty really has */
+        { int len = m->length_ms / 1000, ic[3], k = 0; char vt[3][24]; const char *cap[3];
+          if (len > 0) { ic[k] = ICON_CLOCK; snprintf(vt[k], sizeof vt[k], "%d:%02d", len / 60, len % 60); cap[k++] = "Length"; }
+          if (m->bpm > 0) { ic[k] = ICON_METRONOME; snprintf(vt[k], sizeof vt[k], "%d", m->bpm); cap[k++] = "BPM"; }
+          if (m->nobj > 0) { ic[k] = ICON_TARGET; snprintf(vt[k], sizeof vt[k], "%d", m->nobj); cap[k++] = "Objects"; }
+          float tw = k ? (iw - (k - 1) * 8) / k : 0;
+          for (int i = 0; i < k; i++) {
+              float tx = ix + i * (tw + 8);
+              gfx_rrect(tx, y, tw, 46, 11, C_CELL2);
+              gfx_icon(ic[i], tx + 17, y + 17, 14, 0, C_ACCENT);
+              gfx_text(vt[i], tx + 30, y + 8, 15, 1, C_LABEL, tw - 36, A_LEFT);
+              gfx_text(cap[i], tx + 11, y + 28, 11, 0, C_LABEL2, tw - 16, A_LEFT);
+          }
+          if (k) y += 54; }
         snprintf(b, sizeof b, "%d circles   %d sliders   %d spinners", m->nobj - m->nslider - m->nspinner, m->nslider, m->nspinner);
         gfx_text(b, ix, y, 12, 0, C_LABEL2, iw, A_LEFT); y += 22;
     }
 
-    /* quick options, then Random + Play pinned to the bottom */
-    float playH = 50, by2 = dy + dh - 16 - playH;
-    float qy = by2 - 14 - (RH + GH) - (st->status[0] ? 22 : 0);
-    if (qy > y) {
-        gfx_rrect(ix - 4, qy, iw + 8, RH + GH, 12, C_CELL2);
-        char sk[160]; snprintf(sk, sizeof sk, "%s", c->skin_sel < 0 ? "Built-in" : c->skins.e[c->skin_sel].label);
-        int si = c->skin_sel;
-        if (w_stepper(ix - 4, qy, iw + 8, "Skin", sk, &si, -1, c->skins.n - 1)) {
-            c->skin_sel = si; snprintf(st->skin, sizeof st->skin, "%s", si < 0 ? "" : c->skins.e[si].label);
-        }
-        sep(ix - 4, qy + RH, iw + 8);
-        static const char *aim[] = { "Off", "Soft", "Anywhere" };
-        int mode = st->assist == 1 ? 0 : st->assist == 0 ? 2 : 1;
-        if (w_segment(ix - 4, qy + RH, iw + 8, "Silent aim", aim, 3, &mode))
-            st->assist = mode == 0 ? 1 : mode == 2 ? 0 : c->soft_r;
-    }
-    if (st->status[0]) gfx_text(st->status, ix, by2 - 28, 12, 0, C_LABEL2, iw, A_LEFT);
-    gfx_rrect(ix, by2, 96, playH, 14, C_CELL2);
-    gfx_text("Random", ix + 48, by2 + 15, 15, 1, C_ACCENT, 0, A_CENTER);
-    if (in.pressed && over(ix, by2, 96, playH)) random_set(c);
-    gfx_rrect(ix + 106, by2, iw - 106, playH, 14, df ? C_ACCENT : C_OFF);
-    gfx_text("Play", ix + 106 + (iw - 106) / 2.0f, by2 + 14, 18, 1, C_WHITE, 0, A_CENTER);
-    if (in.pressed && df && over(ix + 106, by2, iw - 106, playH)) commit_play(c);
+    if (st->status[0]) gfx_text(st->status, ix, dy + dh - 26, 12, 0, C_LABEL2, iw, A_LEFT);
     SDL_RenderSetClipRect(c->ren, NULL);
-    gfx_text("Up/Down sets   Left/Right difficulties   F2 random   F3 settings", W - 24, H - 20, 11, 0, gfx_alpha(C_LABEL2, 160), 0, A_RIGHT);
+
+    /* ---- action bar: Mods / Random / Options on the left, the round start button on the right ---- */
+    float abh = 56, aby = H - 24 - abh, abw = (lw - 16) / 3;
+    if (bar_button(lx, aby, abw, abh, ICON_SLIDERS, "Mods", st->mods != 0, mods_active_count(st->mods))) { c->mods_open = 1; c->screen = 0; }
+    if (bar_button(lx + abw + 8, aby, abw, abh, ICON_SHUFFLE, "Random", 0, 0)) random_set(c);
+    if (bar_button(lx + 2 * (abw + 8), aby, abw, abh, ICON_GEAR, "Options", 0, 0)) { c->screen = 1; c->mods_open = 0; }
+    float pr = 46, pcx = W - 24 - pr, pcy = H - 24 - pr;
+    if (play_button(pcx, pcy, pr, df != NULL)) commit_play(c);   /* reads the selection at click time, never a cached one */
+    { char hint[200]; snprintf(hint, sizeof hint, "Up/Down sets   Left/Right difficulties   Enter start   F1 mods   F2 random   F3 options");
+      float hx = lx + lw + 20;
+      gfx_text(hint, hx, aby + 20, 11, 0, gfx_alpha(C_LABEL2, 170), pcx - pr - 16 - hx, A_LEFT); }
 }
 
-/* ---------- settings screen ---------- */
+/* ---------- settings: side panel over the select screen ---------- */
 static void fi(float x, float *y, float w, const char *label, int *v, float lo, float hi, float step, const char *fmt) {
     float f = (float)*v;
     if (w_slider(x, *y, w, label, &f, lo, hi, step, fmt)) *v = (int)lroundf(f);
     *y += SH;
 }
 
-static void draw_settings(Ctx *c, int W, int H) {
-    Settings *st = c->st;
-    float cw = fminf(W - 40, 640), x = (W - cw) / 2;
+enum { CAT_AUDIO, CAT_GAMEPLAY, CAT_INTERFACE, CAT_DISPLAY, CAT_SKIN, CAT_N };
+static const char *CAT_NAMES[CAT_N] = { "Audio", "Gameplay", "Interface", "Display", "Skin" };
+static const int CAT_ICONS[CAT_N] = { ICON_SPEAKER, ICON_TARGET, ICON_WINDOW, ICON_DISPLAY, ICON_PALETTE };
 
-    float vy0 = 56;
-    SDL_Rect clip = { 0, (int)vy0, W, H - (int)vy0 };
+static void settings_category(Ctx *c, int cat, float x, float *py, float cw) {
+    Settings *st = c->st;
+    float y = *py, yy;
+    switch (cat) {
+    case CAT_AUDIO:
+        card(x, y, cw, SH * 3); yy = y;
+        fi(x, &yy, cw, "Master volume", &st->master_vol, 0, 100, 1, "%.0f%%"); sep(x, yy, cw);
+        fi(x, &yy, cw, "Music volume", &st->music_vol, 0, 100, 1, "%.0f%%"); sep(x, yy, cw);
+        fi(x, &yy, cw, "Effect volume (hitsounds)", &st->sfx_vol, 0, 100, 1, "%.0f%%");
+        y += SH * 3 + 16;
+        break;
+    case CAT_GAMEPLAY: {
+        int soft = st->assist != 1 && st->assist != 0;
+        float gh = SH * 4 + RH * 3 + GH * 2 + (soft ? SH : 0);   /* dim, blur, cursor size, input delay (+ soft radius) */
+        card(x, y, cw, gh); yy = y;
+        fi(x, &yy, cw, "Background dim", &st->bg_dim, 0, 100, 1, "%.0f%%"); sep(x, yy, cw);
+        fi(x, &yy, cw, "Background blur", &st->bg_blur, 0, 100, 20, "%.0f%%"); sep(x, yy, cw);
+        w_switch(x, yy, cw, "Show beatmap background", &st->show_bg); yy += RH; sep(x, yy, cw);
+        { float f = st->cursor_size; if (w_slider(x, yy, cw, "Cursor size", &f, 0.3f, 3.0f, 0.05f, "%.2fx")) st->cursor_size = f; yy += SH; sep(x, yy, cw); }
+        w_switch(x, yy, cw, "Cursor trail", &st->cursor_trail); yy += RH; sep(x, yy, cw);
+        w_switch(x, yy, cw, "Hit lighting", &st->hit_lighting); yy += RH; sep(x, yy, cw);
+        { static const char *bo[] = { "None", "Corners", "Full" };
+          w_segment(x, yy, cw, "Playfield border", bo, 3, &st->border); yy += GH; sep(x, yy, cw); }
+        { static const char *aim[] = { "Off", "Soft", "Anywhere" };
+          int mode = st->assist == 1 ? 0 : st->assist == 0 ? 2 : 1;
+          if (w_segment(x, yy, cw, "Silent aim", aim, 3, &mode)) st->assist = mode == 0 ? 1 : mode == 2 ? 0 : c->soft_r;
+          yy += GH; }
+        if (soft) {
+            sep(x, yy, cw);
+            float f = st->assist;
+            if (w_slider(x, yy, cw, "Soft aim radius (circle radii)", &f, 1.2f, 4.0f, 0.1f, "%.1fx")) { st->assist = f; c->soft_r = f; }
+            yy += SH;
+        }
+        sep(x, yy, cw);
+        fi(x, &yy, cw, "Input delay compensation", &st->input_delay, -100, 100, 1, "%+.0f ms");
+        y += gh;
+        gfx_text("Positive values judge your hits earlier, to compensate for input/display lag.", x + 16, y + 6, 12, 0, C_LABEL2, cw - 32, A_LEFT);
+        y += 36;
+        break; }
+    case CAT_INTERFACE:
+        card(x, y, cw, RH * 6); yy = y;
+        w_switch(x, yy, cw, "Show score", &st->show_score); yy += RH; sep(x, yy, cw);
+        w_switch(x, yy, cw, "Show accuracy", &st->show_acc); yy += RH; sep(x, yy, cw);
+        w_switch(x, yy, cw, "Show combo", &st->show_combo); yy += RH; sep(x, yy, cw);
+        w_switch(x, yy, cw, "Show hit error meter", &st->show_error_bar); yy += RH; sep(x, yy, cw);
+        w_switch(x, yy, cw, "Show FPS counter", &st->show_fps); yy += RH; sep(x, yy, cw);
+        w_switch(x, yy, cw, "Show input delay", &st->show_input_delay);
+        y += RH * 6 + 16;
+        break;
+    case CAT_DISPLAY:
+        card(x, y, cw, GH + RH); yy = y;
+        { static const char *fl[] = { "VSync", "60", "120", "240", "480", "Unlimited" };
+          static const int lim[] = { 0, 60, 120, 240, 480, 0 };
+          int i = st->vsync ? 0 : st->fps_limit == 60 ? 1 : st->fps_limit == 120 ? 2 : st->fps_limit == 240 ? 3 : st->fps_limit == 480 ? 4 : 5;
+          if (w_segment(x, yy, cw, "Frame limiter", fl, 6, &i)) { st->vsync = i == 0; st->fps_limit = lim[i]; }
+          yy += GH; sep(x, yy, cw); }
+        if (w_switch(x, yy, cw, "Fullscreen", &st->fullscreen))
+            SDL_SetWindowFullscreen(c->win, st->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+        y += GH + RH + 16;
+        break;
+    case CAT_SKIN: {
+        card(x, y, cw, RH); yy = y;
+        char sk[160]; snprintf(sk, sizeof sk, "%s", c->skin_sel < 0 ? "Built-in" : c->skins.e[c->skin_sel].label);
+        int si = c->skin_sel;
+        if (w_stepper(x, yy, cw, "Skin", sk, &si, -1, c->skins.n - 1)) {
+            c->skin_sel = si; snprintf(st->skin, sizeof st->skin, "%s", si < 0 ? "" : c->skins.e[si].label);
+        }
+        y += RH + 8;
+        gfx_text("Drop an .osk onto the window to import a skin.", x + 16, y, 12, 0, C_LABEL2, cw - 32, A_LEFT);
+        y += 28;
+        break; }
+    }
+    *py = y;
+}
+
+static void draw_settings(Ctx *c, int W, int H) {
+    float pw = fminf(W - 24, 700), sbw = pw < 560 ? 150 : 190;
+    gfx_rrect(0, 0, W, H, 0, (SDL_Color){ 0, 0, 0, 150 });                 /* the select screen stays visible underneath */
+    if (in.pressed && in.mx > pw) { c->screen = 0; return; }                /* click outside the panel closes it */
+    gfx_rrect(-20, 0, pw + 20, H, 20, C_BG);
+    gfx_rrect(0, 0, sbw, H, 0, C_CELL);
+    gfx_rrect(sbw, 0, 1, H, 0, C_SEP);
+
+    /* sidebar: categories */
+    gfx_text("Settings", 20, 22, 22, 1, C_LABEL, sbw - 32, A_LEFT);
+    for (int i = 0; i < CAT_N; i++) {
+        float ry = 72 + i * 46;
+        int sel = i == c->cat;
+        if (sel) gfx_rrect(8, ry, sbw - 16, 40, 10, C_CELL2);
+        gfx_icon(CAT_ICONS[i], 30, ry + 20, 18, sel, sel ? C_ACCENT : C_LABEL2);
+        gfx_text(CAT_NAMES[i], 50, ry + 10, 15, sel, sel ? C_LABEL : C_LABEL2, sbw - 60, A_LEFT);
+        if (in.pressed && over(8, ry, sbw - 16, 40) && c->cat != i) { c->cat = i; c->sscroll = 0; }
+    }
+
+    /* content: the options of the selected category (same widgets and settings as before) */
+    float cx0 = sbw + 16, cw = pw - sbw - 32, vy0 = 64;
+    gfx_text(CAT_NAMES[c->cat], cx0 + 4, 20, 24, 1, C_LABEL, cw - 56, A_LEFT);
+    gfx_circle(pw - 30, 32, 14, C_CELL2);
+    gfx_icon(ICON_XMARK, pw - 30, 32, 13, 1, C_LABEL2);
+    if (in.pressed && over(pw - 48, 14, 36, 36)) { c->screen = 0; return; }
+
+    SDL_Rect clip = { (int)sbw + 1, (int)vy0, (int)(pw - sbw - 1), H - (int)vy0 };
     SDL_RenderSetClipRect(c->ren, &clip);
     float c0 = in.clip0, c1 = in.clip1; in.clip0 = vy0; in.clip1 = H;
     if (in.wheel) c->sscroll -= in.wheel * 60;
     c->sscroll = clampf(c->sscroll, 0, fmaxf(0, c->scontent - (H - vy0)));
-    float y = vy0 + 16 - c->sscroll, top = y, yy;
-
-    header("AUDIO", x, y); y += 24;
-    card(x, y, cw, SH * 3); yy = y;
-    fi(x, &yy, cw, "Master volume", &st->master_vol, 0, 100, 1, "%.0f%%"); sep(x, yy, cw);
-    fi(x, &yy, cw, "Music volume", &st->music_vol, 0, 100, 1, "%.0f%%"); sep(x, yy, cw);
-    fi(x, &yy, cw, "Effect volume (hitsounds)", &st->sfx_vol, 0, 100, 1, "%.0f%%");
-    y += SH * 3 + 24;
-
-    int soft = st->assist != 1 && st->assist != 0;
-    float gh = SH * 4 + RH * 3 + GH * 2 + (soft ? SH : 0);   /* dim, blur, cursor size, input delay (+ soft radius) */
-    header("GAMEPLAY", x, y); y += 24;
-    card(x, y, cw, gh); yy = y;
-    fi(x, &yy, cw, "Background dim", &st->bg_dim, 0, 100, 1, "%.0f%%"); sep(x, yy, cw);
-    fi(x, &yy, cw, "Background blur", &st->bg_blur, 0, 100, 20, "%.0f%%"); sep(x, yy, cw);
-    w_switch(x, yy, cw, "Show beatmap background", &st->show_bg); yy += RH; sep(x, yy, cw);
-    { float f = st->cursor_size; if (w_slider(x, yy, cw, "Cursor size", &f, 0.3f, 3.0f, 0.05f, "%.2fx")) st->cursor_size = f; yy += SH; sep(x, yy, cw); }
-    w_switch(x, yy, cw, "Cursor trail", &st->cursor_trail); yy += RH; sep(x, yy, cw);
-    w_switch(x, yy, cw, "Hit lighting", &st->hit_lighting); yy += RH; sep(x, yy, cw);
-    { static const char *bo[] = { "None", "Corners", "Full" };
-      w_segment(x, yy, cw, "Playfield border", bo, 3, &st->border); yy += GH; sep(x, yy, cw); }
-    { static const char *aim[] = { "Off", "Soft", "Anywhere" };
-      int mode = st->assist == 1 ? 0 : st->assist == 0 ? 2 : 1;
-      if (w_segment(x, yy, cw, "Silent aim", aim, 3, &mode)) st->assist = mode == 0 ? 1 : mode == 2 ? 0 : c->soft_r;
-      yy += GH; }
-    if (soft) {
-        sep(x, yy, cw);
-        float f = st->assist;
-        if (w_slider(x, yy, cw, "Soft aim radius (circle radii)", &f, 1.2f, 4.0f, 0.1f, "%.1fx")) { st->assist = f; c->soft_r = f; }
-        yy += SH;
-    }
-    sep(x, yy, cw);
-    fi(x, &yy, cw, "Input delay compensation", &st->input_delay, -100, 100, 1, "%+.0f ms");
-    y += gh;
-    gfx_text("Positive values judge your hits earlier, to compensate for input/display lag.", x + 16, y + 6, 12, 0, C_LABEL2, cw - 32, A_LEFT);
-    y += 36;
-
-    header("INTERFACE", x, y); y += 24;
-    card(x, y, cw, RH * 6); yy = y;
-    w_switch(x, yy, cw, "Show score", &st->show_score); yy += RH; sep(x, yy, cw);
-    w_switch(x, yy, cw, "Show accuracy", &st->show_acc); yy += RH; sep(x, yy, cw);
-    w_switch(x, yy, cw, "Show combo", &st->show_combo); yy += RH; sep(x, yy, cw);
-    w_switch(x, yy, cw, "Show hit error meter", &st->show_error_bar); yy += RH; sep(x, yy, cw);
-    w_switch(x, yy, cw, "Show FPS counter", &st->show_fps); yy += RH; sep(x, yy, cw);
-    w_switch(x, yy, cw, "Show input delay", &st->show_input_delay);
-    y += RH * 6 + 24;
-
-    header("DISPLAY", x, y); y += 24;
-    card(x, y, cw, GH + RH); yy = y;
-    { static const char *fl[] = { "VSync", "60", "120", "240", "480", "Unlimited" };
-      static const int lim[] = { 0, 60, 120, 240, 480, 0 };
-      int i = st->vsync ? 0 : st->fps_limit == 60 ? 1 : st->fps_limit == 120 ? 2 : st->fps_limit == 240 ? 3 : st->fps_limit == 480 ? 4 : 5;
-      if (w_segment(x, yy, cw, "Frame limiter", fl, 6, &i)) { st->vsync = i == 0; st->fps_limit = lim[i]; }
-      yy += GH; sep(x, yy, cw); }
-    if (w_switch(x, yy, cw, "Fullscreen", &st->fullscreen))
-        SDL_SetWindowFullscreen(c->win, st->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-    y += GH + RH + 16;
-
-    gfx_text("Saved automatically to ~/.local/share/aimless/settings.ini", x + 16, y, 12, 0, C_LABEL2, cw - 32, A_LEFT);
+    float y = vy0 + 8 - c->sscroll, top = y;
+    settings_category(c, c->cat, cx0, &y, cw);
+    gfx_text("Saved automatically to settings.ini", cx0 + 16, y + 4, 12, 0, C_LABEL2, cw - 32, A_LEFT);
     y += 40;
-    c->scontent = y - top + 32;
+    c->scontent = y - top + 24;
     SDL_RenderSetClipRect(c->ren, NULL);
     in.clip0 = c0; in.clip1 = c1;
+}
 
-    /* nav bar on top of the scrolled content */
-    gfx_rrect(0, 0, W, 56, 0, C_BG);
-    gfx_text("Settings", W / 2.0f, 16, 18, 1, C_LABEL, 0, A_CENTER);
-    gfx_text("\xe2\x80\xb9 Songs", x, 16, 18, 0, C_ACCENT, 0, A_LEFT);
-    if (in.pressed && over(x - 10, 6, 110, 44)) c->screen = 0;
+/* ---------- mods sheet ---------- */
+static void draw_mods(Ctx *c, int W, int H) {
+    Settings *st = c->st;
+    int n = mods_count();
+    float sw = fminf(W - 32, 520), rowh = 76, sh = 76 + n * (rowh + 8) + 108 + 64;
+    if (sh > H - 32) sh = H - 32;
+    float sx = (W - sw) / 2, sy = (H - sh) / 2;
+    gfx_rrect(0, 0, W, H, 0, (SDL_Color){ 0, 0, 0, 160 });
+    if (in.pressed && !over(sx, sy, sw, sh)) { c->mods_open = 0; return; }   /* click outside closes */
+    gfx_rrect(sx, sy, sw, sh, 20, C_BG);
+    gfx_rrect(sx + 1, sy + 1, sw - 2, sh - 2, 19, C_CELL);
+
+    gfx_text("Mods", sx + 24, sy + 18, 24, 1, C_LABEL, 0, A_LEFT);
+    { char act[64]; mods_acronyms(st->mods, act, sizeof act);
+      gfx_text(st->mods ? act : "None active", sx + 24, sy + 50, 13, 0, st->mods ? C_ACCENT : C_LABEL2, sw - 100, A_LEFT); }
+    gfx_circle(sx + sw - 34, sy + 32, 14, C_CELL2);
+    gfx_icon(ICON_XMARK, sx + sw - 34, sy + 32, 13, 1, C_LABEL2);
+    if (in.pressed && over(sx + sw - 52, sy + 14, 36, 36)) { c->mods_open = 0; return; }
+
+    float y = sy + 76;
+    for (int i = 0; i < n; i++) {
+        const ModInfo *mi = mods_info(i);
+        int on = (st->mods & mi->bit) != 0;
+        float rx0 = sx + 16, rw0 = sw - 32;
+        if (on) gfx_rrect(rx0, y, rw0, rowh, 14, C_ACCENT);
+        gfx_rrect(on ? rx0 + 2 : rx0, on ? y + 2 : y, on ? rw0 - 4 : rw0, on ? rowh - 4 : rowh, on ? 12 : 14, C_CELL2);
+        gfx_rrect(rx0 + 14, y + 16, 44, 44, 12, on ? C_ACCENT : C_SEG);
+        gfx_text(mi->acronym, rx0 + 36, y + 28, 17, 1, C_WHITE, 0, A_CENTER);
+        gfx_text(mi->name, rx0 + 72, y + 14, 16, 1, C_LABEL, rw0 - 72 - 80, A_LEFT);
+        gfx_text(mi->desc, rx0 + 72, y + 38, 12, 0, C_LABEL2, rw0 - 72 - 80, A_LEFT);
+        float tx = rx0 + rw0 - 14 - 51, ty = y + (rowh - 31) / 2;
+        gfx_rrect(tx, ty, 51, 31, 15.5f, on ? C_GREEN : C_OFF);
+        gfx_circle(tx + (on ? 51 - 15.5f : 15.5f), ty + 15.5f, 13.5f, C_WHITE);
+        if (in.pressed && over(rx0, y, rw0, rowh)) st->mods = mods_toggle(st->mods, (unsigned)mi->bit);
+        y += rowh + 8;
+    }
+    gfx_text("Easy and Hard Rock cannot be combined: turning one on turns the other off.", sx + 24, y + 4, 12, 0, C_LABEL2, sw - 48, A_LEFT);
+    { char b[200]; snprintf(b, sizeof b, "Not supported by this build yet: %s.", mods_unsupported());
+      gfx_text(b, sx + 24, y + 24, 12, 0, C_LABEL2, sw - 48, A_LEFT); }
+    gfx_text("Star ratings are estimates and are not recalculated for mods.", sx + 24, y + 44, 12, 0, C_LABEL2, sw - 48, A_LEFT);
+
+    float by = sy + sh - 16 - 44, bw = (sw - 48 - 8) / 2;
+    int any = st->mods != 0;
+    gfx_rrect(sx + 24, by, bw, 44, 12, C_CELL2);
+    gfx_text("Reset", sx + 24 + bw / 2, by + 12, 16, 1, any ? C_ACCENT : C_LABEL2, 0, A_CENTER);
+    if (in.pressed && any && over(sx + 24, by, bw, 44)) st->mods = 0;
+    gfx_rrect(sx + 32 + bw, by, bw, 44, 12, C_ACCENT);
+    gfx_text("Done", sx + 32 + bw + bw / 2, by + 12, 16, 1, C_WHITE, 0, A_CENTER);
+    if (in.pressed && over(sx + 32 + bw, by, bw, 44)) c->mods_open = 0;
 }
 
 /* ---------- main loop ---------- */
@@ -674,12 +838,13 @@ int menu_run(SDL_Window *win, SDL_Renderer *ren, Settings *st,
               else if (!strcmp(tok, "l")) kc = SDLK_LEFT; else if (!strcmp(tok, "r")) kc = SDLK_RIGHT;
               else if (!strcmp(tok, "f2")) kc = SDLK_F2; else if (!strcmp(tok, "bs")) kc = SDLK_BACKSPACE;
               else if (!strcmp(tok, "enter")) kc = SDLK_RETURN; else if (!strcmp(tok, "home")) kc = SDLK_HOME;
+              else if (!strcmp(tok, "f1")) kc = SDLK_F1; else if (!strcmp(tok, "f3")) kc = SDLK_F3; else if (!strcmp(tok, "esc")) kc = SDLK_ESCAPE;
               if (kc) { ev.type = SDL_KEYDOWN; ev.key.keysym.sym = kc; SDL_PushEvent(&ev); }
               else if (!strncmp(tok, "t:", 2)) { ev.type = SDL_TEXTINPUT; snprintf(ev.text.text, sizeof ev.text.text, "%s", tok + 2); SDL_PushEvent(&ev); }
-              else if (!strncmp(tok, "click:", 6)) {
-                  int cx = 0, cy = 0; sscanf(tok + 6, "%d:%d", &cx, &cy);
+              else if (!strncmp(tok, "click:", 6) || !strncmp(tok, "dclick:", 7)) {
+                  int dbl = tok[0] == 'd', cx = 0, cy = 0; sscanf(tok + (dbl ? 7 : 6), "%d:%d", &cx, &cy);
                   SDL_WarpMouseInWindow(win, cx, cy); SDL_PumpEvents();
-                  ev.type = SDL_MOUSEBUTTONDOWN; ev.button.button = SDL_BUTTON_LEFT; ev.button.clicks = 1; ev.button.x = cx; ev.button.y = cy; SDL_PushEvent(&ev);
+                  ev.type = SDL_MOUSEBUTTONDOWN; ev.button.button = SDL_BUTTON_LEFT; ev.button.clicks = dbl ? 2 : 1; ev.button.x = cx; ev.button.y = cy; SDL_PushEvent(&ev);
                   SDL_Event up; memset(&up, 0, sizeof up); up.type = SDL_MOUSEBUTTONUP; up.button.button = SDL_BUTTON_LEFT; SDL_PushEvent(&up);
               }
               MapSet *cs = cur_set(&c); Diff *cd = cur_diff(&c);
@@ -696,12 +861,18 @@ in.pressed = 0; in.wheel = 0; in.idc = 0; c.dbl = 0; c.th_loads = 0;
                 in.pressed = 1; in.down = 1; if (e.button.clicks >= 2) c.dbl = 1;
             } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) in.down = 0;
             else if (e.type == SDL_MOUSEWHEEL) in.wheel += e.wheel.y;
-            else if (e.type == SDL_TEXTINPUT && c.screen == 0) {
+            else if (e.type == SDL_TEXTINPUT && c.screen == 0 && !c.mods_open) {
                 if (strlen(c.qtext) + strlen(e.text.text) < sizeof c.qtext - 1) { strcat(c.qtext, e.text.text); refilter(&c); }
             } else if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode k = e.key.keysym.sym;
-                if (k == SDLK_F3) c.screen = !c.screen;
-                else if (c.screen == 1) { if (k == SDLK_ESCAPE) c.screen = 0; }
+                if (k == SDLK_F3) { c.screen = !c.screen; c.mods_open = 0; }
+                else if (k == SDLK_F1) { c.mods_open = !c.mods_open; c.screen = 0; }
+                else if (c.screen == 1) {
+                    if (k == SDLK_ESCAPE) c.screen = 0;
+                    else if (k == SDLK_DOWN && c.cat < CAT_N - 1) { c.cat++; c.sscroll = 0; }
+                    else if (k == SDLK_UP && c.cat > 0) { c.cat--; c.sscroll = 0; }
+                }
+                else if (c.mods_open) { if (k == SDLK_ESCAPE || k == SDLK_RETURN || k == SDLK_KP_ENTER) c.mods_open = 0; }
                 else switch (k) {
                 case SDLK_ESCAPE: if (c.qtext[0]) { c.qtext[0] = 0; refilter(&c); } else { c.running = 0; c.result = 0; } break;
                 case SDLK_BACKSPACE: if (c.qtext[0]) { utf8_backspace(c.qtext); refilter(&c); } break;
@@ -732,13 +903,19 @@ in.pressed = 0; in.wheel = 0; in.idc = 0; c.dbl = 0; c.th_loads = 0;
 
         int W, H; SDL_GetWindowSize(win, &W, &H);
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
-        if (c.screen == 0) {
-            if (c.cover) { /* dim backdrop from the cover */
-                SDL_SetTextureColorMod(c.cover, 38, 38, 42);
-                gfx_cover(c.cover, c.cw, c.ch, 0, 0, W, H);
-            }
-            draw_select(&c, W, H);
-        } else draw_settings(&c, W, H);
+        /* the select screen is always drawn; the settings panel / mods sheet go over it. Overlays that were already open at
+         * the start of the frame own the mouse, so the click that opens one is never seen by it as an outside click. */
+        int ov_settings = c.screen == 1, ov_mods = c.mods_open;
+        int s_pressed = in.pressed, s_wheel = in.wheel, s_dbl = c.dbl;
+        if (ov_settings || ov_mods) { in.pressed = 0; in.wheel = 0; c.dbl = 0; }
+        if (c.cover) { /* dim backdrop from the cover */
+            SDL_SetTextureColorMod(c.cover, 38, 38, 42);
+            gfx_cover(c.cover, c.cw, c.ch, 0, 0, W, H);
+        }
+        draw_select(&c, W, H);
+        in.pressed = s_pressed; in.wheel = s_wheel; c.dbl = s_dbl;
+        if (ov_settings && c.screen == 1) draw_settings(&c, W, H);
+        else if (ov_mods && c.mods_open) draw_mods(&c, W, H);
         SDL_RenderPresent(ren);
 
 #ifdef AIMLESS_DEBUG

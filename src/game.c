@@ -1,4 +1,5 @@
 #include "game.h"
+#include "mods.h"
 #include "audio.h"
 #include "beatmap.h"
 #include "font.h"
@@ -260,6 +261,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
     Beatmap bm;
     int rc = beatmap_load(&bm, map, 0);
     if (rc) { snprintf(st->status, sizeof st->status, "failed to load beatmap (%d)", rc); return 0; }
+    mods_apply_beatmap(&bm, st->mods);   /* Easy / Hard Rock: difficulty values (and Hard Rock's flip) before anything reads them */
 
     char ap[1024];
     snprintf(ap, sizeof ap, "%s/%s", bm.dir, bm.audio);

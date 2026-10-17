@@ -22,23 +22,37 @@ Loads **osu! stable skins** (hitcircle, overlay, approach circle, cursor, number
 - Uncapped FPS by default; frame limiter, FPS counter and input delay readout in the HUD
 
 ## Song select
-Laid out like osu!lazer's carousel: beatmaps are grouped into **sets**, the selected set expands to show its **difficulties**
-(ordered by star rating, with lazer's difficulty colours), and a details panel shows the cover, title, artist, mapper,
-CS/AR/OD/HP, BPM, length and object counts.
+Organised like osu!lazer's song select, drawn in aimless' own Cupertino style: a fixed **info panel** on the left (cover, title, artist,
+mapper, difficulty, CS/AR/OD/HP, length, BPM, object counts) that follows the selected set and difficulty, and on the right the carousel:
+beatmaps are grouped into **sets**, the selected set expands to show its **difficulties** (ordered by star rating, with lazer's difficulty colours).
+The **action bar** at the bottom has **Mods**, **Random** and **Options**, and a round **start button** sits in the bottom-right corner.
 
 - **Search** by just typing: words match title, artist, mapper, difficulty name, source and tags.
   Filters work too: `stars>5`, `ar>=9.5`, `cs<4`, `od=8`, `hp<5`, `bpm>180`, `length<120` (seconds), e.g. `camellia stars>4`.
 - **Sort**: artist, title, date added, difficulty, length, BPM. **Group**: none, artist, title, difficulty. Both are remembered.
 - The **song preview** plays from the map's `PreviewTime` (needs an mp3/ogg), and the last played map is reselected on start.
-- Keys: `Up`/`Down` sets, `Left`/`Right` difficulties, `Enter` play, `F2` random, `F3` settings, `F5` rescan, `Esc` clears the search / quits.
-  Click a set to select it, click the selected difficulty (or double-click a set) to play.
+- **Starting a map** (there is no Play button): click a difficulty once to select it; click the selected difficulty again, or double-click
+  any difficulty, to start it. The round button in the bottom-right corner (or `Enter`) starts the difficulty that is selected at that moment.
+- Keys: `Up`/`Down` sets, `Left`/`Right` difficulties, `Enter` start, `F1` mods, `F2` random, `F3` options, `F5` rescan, `Esc` clears the search / closes
+  a panel / quits. The info panel also has previous / next difficulty buttons (same as `Left`/`Right`) and the search field has a clear button.
+- **Mods** (`F1` or the Mods button): a sheet with the mods this build can really apply, **Easy** (CS/AR/OD/HP halved) and **Hard Rock**
+  (CS x1.3, AR/OD/HP x1.4, capped at 10, and the playfield flipped vertically). They cannot be combined, are applied when the map is started
+  and stay selected for the session (they are not saved to `settings.ini`). The info panel shows the adjusted CS/AR/OD/HP in the accent colour;
+  the star rating is an estimate and is **not** recalculated for mods. Double Time, Half Time, Hidden, Flashlight and No Fail are not offered:
+  the audio engine cannot change the song speed, and there is no health/fail system or Hidden/Flashlight rendering yet.
+- Metadata shown comes straight from the `.osu` files: mapper, length, BPM and object count appear only when the beatmap has them
+  (a set card shows the length and BPM of its first difficulty, or of the chosen one once the set is selected).
+- Icons follow the SF Symbols look (round caps, one stroke weight) and are drawn in code by `src/icons.c`, so there are no image
+  or font files to ship (the round start button is drawn in code too; the project ships no osu! branding) and they behave the same on Linux and Windows. Add a new icon to the enum in `src/icons.h` and to `build()` in `src/icons.c`.
 - Scanning is cached in `~/.local/share/aimless/library.cache` (keyed by file path, size and mtime), so only new or changed maps are re-read.
 
 **The star rating is an estimate.** It is a simplified strain model on the object heads (sliders and mods are not simulated), used for
 ordering and colours only. It is not osu!'s official calculation and will not match the numbers you see in osu!.
 
 ## Settings
-Open **Settings** in the song select (or press `F3`). Everything is saved automatically to `~/.local/share/aimless/settings.ini`
+Open **Options** in the song select (or press `F3`): a side panel slides over the song select with the categories on the left
+(Audio, Gameplay, Interface, Display, Skin; `Up`/`Down` or a click switch category) and the options of the selected category next to them.
+`Esc`, the close button or a click outside the panel closes it. Everything is saved automatically to `~/.local/share/aimless/settings.ini`
 (hand-editable). The UI is drawn in an iOS-style dark look; type in the song list to search, drop `.osz`/`.osk` to import.
 
 | Group | Options |
@@ -47,6 +61,7 @@ Open **Settings** in the song select (or press `F3`). Everything is saved automa
 | Gameplay | background dim, background blur, show background, cursor size, cursor trail, hit lighting, playfield border (none / corners / full), silent aim (off / soft / anywhere, soft radius), input delay compensation (-100..100 ms) |
 | Interface | show score, accuracy, combo, hit error meter, FPS counter, input delay |
 | Display | frame limiter (VSync / 60 / 120 / 240 / 480 / unlimited), fullscreen |
+| Skin | the skin used for the next map |
 
 **Input delay**: with the option on, the HUD shows the measured lag between the real input event and the frame that handled it,
 plus your compensation. Hits are judged at the event timestamp, so frame rate does not add delay.
@@ -67,7 +82,7 @@ Bezier (with red anchors), linear, perfect-circle and catmull(as linear) curves;
 `combobreak.{wav,ogg,mp3}` from the skin plays when a combo of 20+ breaks (generated thud otherwise).
 
 ## Not implemented yet
-Spinners (skipped), `sliderslide` loop sound, mods, results screen, Vulkan renderer.
+Spinners (skipped), `sliderslide` loop sound, mods other than Easy and Hard Rock, results screen, Vulkan renderer.
 
 ## Install
 Grab `aimless-*-x86_64-arch.tar.gz` from [Releases](../../releases) or build it yourself:

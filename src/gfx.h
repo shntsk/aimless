@@ -1,6 +1,7 @@
 #ifndef GFX_H
 #define GFX_H
 #include <SDL.h>
+#include "icons.h"
 
 /* Small drawing toolkit for the iOS-style ("Cupertino") UI: rounded rects, AA circles, cached text. */
 extern SDL_Color C_BG, C_CELL, C_CELL2, C_SEP, C_LABEL, C_LABEL2, C_ACCENT, C_GREEN, C_RED, C_WHITE;
@@ -14,6 +15,8 @@ void  gfx_circle(float cx, float cy, float r, SDL_Color c);
 void  gfx_round_mask(float x, float y, float w, float h, float r, SDL_Color bg); /* rounds an image's corners */
 void  gfx_star(float cx, float cy, float r, SDL_Color c);
 void  gfx_line_h(float x, float y, float w, SDL_Color c);
+/* SF-Symbols-style icon (see icons.h), centred on cx,cy, size x size px. weight: 0 regular, 1 semibold, 2 bold */
+void  gfx_icon(int icon, float cx, float cy, float size, int weight, SDL_Color c);
 
 enum { A_LEFT, A_CENTER, A_RIGHT };
 /* y is the top of the text. returns drawn width. maxw <= 0: no limit (ellipsis otherwise) */
