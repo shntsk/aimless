@@ -6,6 +6,7 @@
 #include "skin.h"
 #include "circlegeom.h"
 #include "numlayout.h"
+#include "sliderbody.h"
 #include <SDL_mixer.h>
 #include <math.h>
 #include <stdio.h>
@@ -116,6 +117,67 @@ static void slider_pos(const Obj *o, double t, float *x, float *y) {
     *y = o->path[i0*2+1] + (o->path[i0*2+3] - o->path[i0*2+1]) * fr;
 }
 
+/* cached slider body textures: the CPU rasteriser is exact but too heavy to run every frame */
+#define N_BODY 24
+typedef struct {
+    const Obj *o; SDL_Texture *tex; int x0, y0, w, h;
+    float s, ox, oy, r; Uint8 acc[3], bor[3]; unsigned used;
+} BodyCache;
+static BodyCache body_cache[N_BODY];
+static unsigned body_tick;
+
+static void body_release(BodyCache *b) { if (b->tex) SDL_DestroyTexture(b->tex); memset(b, 0, sizeof *b); }
+static void body_release_all(void) { for (int i = 0; i < N_BODY; i++) body_release(&body_cache[i]); body_tick = 0; }
+static void body_release_obj(const Obj *o) { for (int i = 0; i < N_BODY; i++) if (body_cache[i].o == o) body_release(&body_cache[i]); }
+
+static void body_draw(SDL_Renderer *ren, const Obj *o, float s, float ox, float oy, float r,
+                      const Uint8 *acc, const Uint8 *bor, int alpha) {
+    BodyCache *b = NULL;
+    for (int i = 0; i < N_BODY && !b; i++) if (body_cache[i].o == o) b = &body_cache[i];
+    for (int i = 0; i < N_BODY && !b; i++) if (!body_cache[i].o) b = &body_cache[i];
+    if (!b) { b = &body_cache[0]; for (int i = 1; i < N_BODY; i++) if (body_cache[i].used < b->used) b = &body_cache[i]; }
+    if (b->o == o && b->tex && b->s == s && b->ox == ox && b->oy == oy && b->r == r &&
+        !memcmp(b->acc, acc, 3) && !memcmp(b->bor, bor, 3)) goto draw;
+    body_release(b);
+
+    /* bounding box of the path (+ the radius), clipped to the window so a huge slider cannot exceed the texture limit */
+    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+    for (int i = 0; i < o->npath; i++) {
+        float x = ox + o->path[i*2] * s, y = oy + o->path[i*2+1] * s;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+    }
+    int ow = 0, oh = 0; SDL_GetRendererOutputSize(ren, &ow, &oh);
+    int x0 = (int)floorf(minx - r) - 1, y0 = (int)floorf(miny - r) - 1;
+    int x1 = (int)ceilf(maxx + r) + 1, y1 = (int)ceilf(maxy + r) + 1;
+    if (ow > 0) { if (x0 < -(int)r - 1) x0 = -(int)r - 1; if (x1 > ow + (int)r + 1) x1 = ow + (int)r + 1; }
+    if (oh > 0) { if (y0 < -(int)r - 1) y0 = -(int)r - 1; if (y1 > oh + (int)r + 1) y1 = oh + (int)r + 1; }
+    int w = x1 - x0, h = y1 - y0;
+    if (w < 1 || h < 1 || w > 8192 || h > 8192) return;
+    unsigned char *px = malloc((size_t)w * h * 4);
+    float *pts = malloc((size_t)o->npath * 2 * sizeof(float));
+    if (!px || !pts) { free(px); free(pts); return; }
+    for (int i = 0; i < o->npath; i++) { pts[i*2] = ox + o->path[i*2] * s - x0; pts[i*2+1] = oy + o->path[i*2+1] * s - y0; }
+    sliderbody_render(px, w, h, pts, o->npath, r, acc, bor);
+    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+    if (tex) {
+        SDL_UpdateTexture(tex, NULL, px, w * 4);
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+    }
+    free(px); free(pts);
+    if (!tex) return;
+    b->o = o; b->tex = tex; b->x0 = x0; b->y0 = y0; b->w = w; b->h = h;
+    b->s = s; b->ox = ox; b->oy = oy; b->r = r; memcpy(b->acc, acc, 3); memcpy(b->bor, bor, 3);
+draw:
+    b->used = ++body_tick;
+    SDL_SetTextureAlphaMod(b->tex, alpha);
+    SDL_FRect d = { (float)b->x0, (float)b->y0, (float)b->w, (float)b->h };
+    SDL_RenderCopyF(ren, b->tex, NULL, &d);
+}
+
 /* body, ticks, end circle, reverse arrows, ball + follow circle, final judgement. The head circle and the
  * approach circle are drawn by the caller while the head is still pending. */
 static void draw_slider(SDL_Renderer *ren, Skin *sk, Obj *o, double t, float s, float ox, float oy,
@@ -123,6 +185,7 @@ static void draw_slider(SDL_Renderer *ren, Skin *sk, Obj *o, double t, float s, 
     float d = rad * 2 * s * 1.05f;
     float kk = sk->hitcircle.w ? d / sk->hitcircle.w : 1;       /* skin sprites are authored against hitcircle */
     if (o->done) { /* judgement flash at the tail, nothing else */
+        body_release_obj(o);
         float age = (float)(t - o->judge_time);
         if (age < 400 && age >= 0) {
             float ex = ox + o->path[(o->npath - 1) * 2] * s, ey = oy + o->path[(o->npath - 1) * 2 + 1] * s;
@@ -135,23 +198,12 @@ static void draw_slider(SDL_Renderer *ren, Skin *sk, Obj *o, double t, float s, 
     float fade = fminf(1, (float)(t - (o->time - preempt)) / fminf(400, preempt));
     int a = (int)(fade * 255);
     Uint8 *c = sk->combo[o->color % sk->n_combo];
-    Uint8 trk[3] = { (Uint8)(c[0] * 35 / 100), (Uint8)(c[1] * 35 / 100), (Uint8)(c[2] * 35 / 100) };
-    if (sk->has_track) memcpy(trk, sk->slider_track, 3);
+    /* body colour: SliderTrackOverride when the skin has one, otherwise the combo colour as is (lazer draws the
+     * legacy body from the accent colour with a constant 0.7 alpha, no darkening) */
+    const Uint8 *trk = sk->has_track ? sk->slider_track : c;
 
-    /* body: stamp discs along the path, border first, then the darker track on top */
-    int stepi = (int)(rad * 0.3f / o->step); if (stepi < 1) stepi = 1;
-    for (int pass = 0; pass < 2; pass++) {
-        const Uint8 *col = pass ? trk : sk->slider_border;
-        float dd = pass ? d * 0.86f : d;
-        /* opaque stamps (overlapping translucent ones band): fade in by scaling the colour instead */
-        SDL_SetTextureColorMod(sk->disc.t, col[0] * a / 255, col[1] * a / 255, col[2] * a / 255);
-        for (int i = 0; ; i += stepi) {
-            if (i > o->npath - 1) i = o->npath - 1;
-            draw_tex(ren, &sk->disc, ox + o->path[i*2] * s, oy + o->path[i*2+1] * s, dd, dd, 255);
-            if (i == o->npath - 1) break;
-        }
-    }
-    SDL_SetTextureColorMod(sk->disc.t, 255, 255, 255);
+    /* body: lazer's legacy slider path, rasterised once per slider and cached (see sliderbody.c) */
+    body_draw(ren, o, s, ox, oy, d * 0.5f, trk, sk->slider_border, a);
 
     /* upcoming ticks */
     for (int e = o->evi; e < o->nev; e++) if (o->ev[e*2+1] == 0) {
@@ -514,6 +566,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
     if (getenv("AIMLESS_CLK")) fprintf(stderr, "clock offset vs audio: %.1f ms\n", clk);
 #endif
     Mix_HaltMusic();
+    body_release_all();
     sfx_free(); skin_free(&sk); beatmap_free(&bm);
     if (bg) SDL_DestroyTexture(bg);
     text_free(&t_fps); text_free(&t_acc); text_free(&t_lag);

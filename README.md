@@ -63,7 +63,7 @@ Files are looked up as `<set>-hit<normal|whistle|finish|clap>[N]` (N only when >
 The game clock is steered toward the music position (SDL_mixer >= 2.6) so hits and hitsounds line up with what you hear.
 
 ## Sliders
-Bezier (with red anchors), linear, perfect-circle and catmull(as linear) curves; ticks, repeats and a tail judged by how much you followed (all = 300, half = 100, any = 50). Follow needs a held key/button and the cursor near the ball (silent aim widens that to your assist radius). Skin parts: `sliderb0..9`/`sliderb`, `sliderfollowcircle`, `reversearrow`, `sliderscorepoint`, `sliderendcircle(+overlay)`, `SliderBorder` / `SliderTrackOverride` in skin.ini, with fallbacks.
+Bezier (with red anchors), linear, perfect-circle and catmull(as linear) curves; ticks, repeats and a tail judged by how much you followed (all = 300, half = 100, any = 50). Follow needs a held key/button and the cursor near the ball (silent aim widens that to your assist radius). Skin parts: `sliderb0..9`/`sliderb`, `sliderfollowcircle`, `reversearrow`, `sliderscorepoint`, `sliderendcircle(+overlay)`, `SliderBorder` / `SliderTrackOverride` in skin.ini, with fallbacks. The body is drawn like osu!lazer's legacy slider (soft shadow, `SliderBorder` band, gradient of the combo colour or `SliderTrackOverride` at 70 % alpha; constants taken from `LegacySliderBody.cs`, see `src/sliderbody.c`).
 `combobreak.{wav,ogg,mp3}` from the skin plays when a combo of 20+ breaks (generated thud otherwise).
 
 ## Not implemented yet
