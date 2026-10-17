@@ -5,6 +5,7 @@ typedef struct {
     /* input / aim */
     float assist;           /* hit radius in circle radii; 0 = anywhere; 1 = no assist */
     int   input_delay;      /* ms compensation: judge your hits this many ms earlier (-100..100) */
+    int   key1, key2;       /* gameplay keys K1 / K2 as SDL scancodes (physical position), defaults Z / X; see keybind.h */
     /* video */
     int   vsync;
     int   fps_limit;        /* when vsync is off: 0 = unlimited, else 60/120/240/480 */

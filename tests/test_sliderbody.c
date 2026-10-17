@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -56,6 +57,34 @@ int main(void) {
     CHECK(PX(60 - 20, 50, 3) > 0 && PX(60 - 31, 50, 3) == 0, "round cap");
     /* symmetry */
     CHECK(PX(100, 50 - 12, 0) == PX(100, 50 + 11, 0), "symmetric across the centre line");
+
+    /* banded rendering (game.c spreads one body over several frames) must give exactly the bytes of a full render,
+     * for any band height, for a curved multi-segment path and for a single point */
+    {
+        enum { CW = 173, CH = 131, NP = 40 };
+        float cp[NP * 2];
+        for (int i = 0; i < NP; i++) { float u = i / (float)(NP - 1); cp[i*2] = 25 + 120 * u; cp[i*2+1] = 65 + 40 * sinf(u * 6.2831f); }
+        static unsigned char full[CW * CH * 4], band[CW * CH * 4];
+        int bands[] = { 1, 7, 16, 50, CH, CH + 9 };
+        for (int variant = 0; variant < 2; variant++) {
+            int np = variant ? 1 : NP;
+            sliderbody_render(full, CW, CH, cp, np, 14.5f, grey, bord);
+            for (int b = 0; b < (int)(sizeof bands / sizeof *bands); b++) {
+                for (int i = 0; i < CW * CH * 4; i++) band[i] = 0xAA;      /* stale data must be overwritten */
+                for (int y = 0; y < CH; y += bands[b]) sliderbody_render_rows(band, CW, CH, cp, np, 14.5f, grey, bord, y, y + bands[b]);
+                CHECK(!memcmp(full, band, sizeof full), "banded render (%s, band %d rows) differs from the full render",
+                      variant ? "single point" : "curve", bands[b]);
+            }
+        }
+        /* a band only touches its own rows */
+        for (int i = 0; i < CW * CH * 4; i++) band[i] = 0x55;
+        sliderbody_render_rows(band, CW, CH, cp, NP, 14.5f, grey, bord, 40, 60);
+        int untouched = 1;
+        for (int i = 0; i < CW * CH * 4; i++) if ((i < 40 * CW * 4 || i >= 60 * CW * 4) && band[i] != 0x55) untouched = 0;
+        CHECK(untouched, "sliderbody_render_rows wrote outside its rows");
+        sliderbody_render_rows(band, CW, CH, cp, NP, 14.5f, grey, bord, -5, 0);     /* empty / out of range: no-op, no crash */
+        sliderbody_render_rows(band, CW, CH, cp, NP, 14.5f, grey, bord, CH, CH + 5);
+    }
 
     if (getenv("SLIDERBODY_DUMP")) {   /* preview on a dark playfield colour, for eyeballing only */
         FILE *f = fopen(getenv("SLIDERBODY_DUMP"), "wb");

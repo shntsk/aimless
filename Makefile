@@ -24,11 +24,12 @@ TESTS_POSIX = tests/test_skin tests/test_skin_loader
 ifneq (,$(EXE))
 TESTS_POSIX =
 endif
-test: tests/test_plat$(EXE) tests/test_sliderbody$(EXE) tests/test_icons$(EXE) tests/test_mods$(EXE) $(TESTS_POSIX)
+test: tests/test_plat$(EXE) tests/test_sliderbody$(EXE) tests/test_icons$(EXE) tests/test_mods$(EXE) tests/test_keybind$(EXE) $(TESTS_POSIX)
 	./tests/test_plat$(EXE)
 	./tests/test_sliderbody$(EXE)
 	./tests/test_icons$(EXE)
 	./tests/test_mods$(EXE)
+	./tests/test_keybind$(EXE)
 ifneq (,$(TESTS_POSIX))
 	./tests/test_skin $(if $(OSK),"$(OSK)")
 	./tests/test_skin_loader $(if $(OSK),"$(OSK)")
@@ -45,6 +46,10 @@ tests/test_sliderbody$(EXE): tests/test_sliderbody.c src/sliderbody.c src/slider
 tests/test_mods$(EXE): tests/test_mods.c src/mods.c src/mods.h src/beatmap.c src/beatmap.h src/plat.c $(wildcard src/*.h)
 	$(CC) $(CFLAGS) $(PLAT_CFLAGS) tests/test_mods.c src/mods.c src/beatmap.c src/plat.c -o $@ -lm $(if $(EXE),-lshell32)
 
+# gameplay key bindings (K1 / K2): validation, conflict rules and the settings.ini round trip (pure C, no SDL)
+tests/test_keybind$(EXE): tests/test_keybind.c src/keybind.c src/keybind.h src/settings.c src/settings.h src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c $(wildcard src/*.h)
+	$(CC) $(CFLAGS) $(PLAT_CFLAGS) tests/test_keybind.c src/keybind.c src/settings.c src/plat.c src/paths.c src/skinfs.c src/skinini.c src/beatmap.c src/library.c src/mapinfo.c -o $@ -lm $(if $(EXE),-lshell32)
+
 # procedural SF-Symbols-style icons (pure C, no SDL)
 tests/test_icons$(EXE): tests/test_icons.c src/icons.c src/icons.h
 	$(CC) $(CFLAGS) $(PLAT_CFLAGS) tests/test_icons.c src/icons.c -o $@ -lm
@@ -57,7 +62,7 @@ tests/test_skin_loader: tests/test_skin_loader.c src/skin.c src/plat.c src/skinf
 	$(CC) $(CFLAGS) -Itests/sdlfake tests/test_skin_loader.c src/skin.c src/plat.c src/skinfs.c src/skinini.c tests/sdlfake/fake.c -o $@ -lm
 
 clean:
-	rm -f aimless aimless.exe tests/test_plat tests/test_skin tests/test_skin_loader tests/test_sliderbody tests/test_icons tests/test_mods tests/*.exe
+	rm -f aimless aimless.exe tests/test_plat tests/test_skin tests/test_skin_loader tests/test_sliderbody tests/test_icons tests/test_mods tests/test_keybind tests/*.exe
 
 PREFIX ?= /usr/local
 install: aimless$(EXE)

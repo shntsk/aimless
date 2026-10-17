@@ -13,3 +13,6 @@ tests/test_skin
 tests/test_skin_loader
 tests/*.exe
 tests/test_icons
+tests/test_mods
+tests/test_sliderbody
+tests/test_keybind

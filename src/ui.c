@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "beatmap.h"
 #include "gfx.h"
+#include "keybind.h"
 #include "library.h"
 #include "mods.h"
 #include "paths.h"
@@ -116,6 +117,10 @@ typedef struct {
     int screen;                                 /* 0 select, 1 settings side panel (drawn over the select screen) */
     int mods_open;                              /* mods sheet (drawn over the select screen) */
     int cat;                                    /* settings category shown */
+    int capture;                                /* gameplay key being rebound: 0 none, 1 = K1, 2 = K2 */
+    int kb_hit;                                 /* a click this frame landed on a key row (draw_settings) */
+    int swallow;                                /* scancode of the key that just ended a capture: ignored until it is released */
+    char kmsg[192]; int kmsg_err;               /* hint / conflict message under the key rows */
     float sscroll, scontent, soft_r;
     int result, running;
 } Ctx;
@@ -620,6 +625,71 @@ static void fi(float x, float *y, float w, const char *label, int *v, float lo, 
     *y += SH;
 }
 
+/* ---------- gameplay keys (K1 / K2) ----------
+ * Same flow as lazer's KeyBindingRow (focus the row, the next key press is the new binding, Escape / click elsewhere /
+ * losing focus cancels, a clash is refused), reduced to two fixed rows. While `capture` is set the event loop in menu_run
+ * hands every key event to capture_key() and nothing else sees it, so the key cannot press a button or move a category. */
+_Static_assert(KB_SC_Z == (int)SDL_SCANCODE_Z && KB_SC_X == (int)SDL_SCANCODE_X && KB_SC_ESCAPE == (int)SDL_SCANCODE_ESCAPE &&
+               KB_SC_LAST == (int)SDL_SCANCODE_RGUI && KB_SC_LGUI == (int)SDL_SCANCODE_LGUI && KB_SC_CAPSLOCK == (int)SDL_SCANCODE_CAPSLOCK &&
+               KB_SC_NUMLOCK == (int)SDL_SCANCODE_NUMLOCKCLEAR && KB_SC_SCROLLLOCK == (int)SDL_SCANCODE_SCROLLLOCK &&
+               KB_SC_PRINTSCREEN == (int)SDL_SCANCODE_PRINTSCREEN && KB_SC_PAUSE == (int)SDL_SCANCODE_PAUSE &&
+               KB_SC_APPLICATION == (int)SDL_SCANCODE_APPLICATION && KB_SC_POWER == (int)SDL_SCANCODE_POWER,
+               "keybind.h scancode constants must match SDL2");
+
+/* what the key is called on the player's layout ("Z" on QWERTY is where "W" is printed on AZERTY: scancodes are positions) */
+static void key_label(int sc, char *out, size_t n) {
+    const char *nm = SDL_GetKeyName(SDL_GetKeyFromScancode((SDL_Scancode)sc));
+    if (!nm || !*nm) nm = SDL_GetScancodeName((SDL_Scancode)sc);
+    if (nm && *nm) snprintf(out, n, "%s", nm); else snprintf(out, n, "Key %d", sc);
+}
+
+static void capture_end(Ctx *c) { c->capture = 0; }
+
+static void capture_key(Ctx *c, int sc) {
+    Settings *st = c->st;
+    int which = c->capture, *tgt = which == 1 ? &st->key1 : &st->key2, other = which == 1 ? st->key2 : st->key1;
+    char nm[64];
+    c->kmsg_err = 0;
+    switch (keybind_check(sc, other)) {
+    case KB_CANCEL:                                    /* Esc: nothing is touched */
+        c->kmsg[0] = 0; c->swallow = sc; capture_end(c); break;
+    case KB_REJECT:
+        key_label(sc, nm, sizeof nm);
+        snprintf(c->kmsg, sizeof c->kmsg, "%s can't be used as a gameplay key. Press another key, or Esc to cancel.", nm);
+        c->kmsg_err = 1; break;
+    case KB_CONFLICT:
+        key_label(sc, nm, sizeof nm);
+        snprintf(c->kmsg, sizeof c->kmsg, "%s is already assigned to K%d. Press another key, or Esc to cancel.", nm, which == 1 ? 2 : 1);
+        c->kmsg_err = 1; break;
+    default:                                           /* KB_OK: the only path that changes a binding */
+        *tgt = sc;
+        key_label(sc, nm, sizeof nm);
+        snprintf(c->kmsg, sizeof c->kmsg, "K%d is now %s.", which, nm);
+        c->swallow = sc; capture_end(c);
+        settings_save(st);
+        break;
+    }
+}
+
+static void w_keybind(Ctx *c, float x, float y, float w, const char *label, int which, int sc) {
+    int cap = c->capture == which;
+    gfx_text(label, x + 16, y + 14, 16, 0, C_LABEL, w * 0.3f, A_LEFT);
+    float bw = fminf(170, w * 0.5f), bx = x + w - 16 - bw, by = y + 8, bh = 32;
+    char nm[64]; key_label(sc, nm, sizeof nm);
+    if (cap) {
+        gfx_rrect(bx - 2, by - 2, bw + 4, bh + 4, 11, gfx_alpha(C_ACCENT, 90));
+        gfx_rrect(bx, by, bw, bh, 9, C_ACCENT);
+        gfx_text("Press a key...", bx + bw / 2, by + 7, 15, 1, C_WHITE, bw - 12, A_CENTER);
+    } else {
+        gfx_rrect(bx, by, bw, bh, 9, C_SEG);
+        gfx_text(nm, bx + bw / 2, by + 7, 15, 1, C_LABEL, bw - 12, A_CENTER);
+    }
+    if (in.pressed && over(x, y, w, RH)) {
+        c->kb_hit = 1; c->kmsg[0] = 0; c->kmsg_err = 0;
+        c->capture = cap ? 0 : which;                  /* clicking the active row again cancels */
+    }
+}
+
 enum { CAT_AUDIO, CAT_GAMEPLAY, CAT_INTERFACE, CAT_DISPLAY, CAT_SKIN, CAT_N };
 static const char *CAT_NAMES[CAT_N] = { "Audio", "Gameplay", "Interface", "Display", "Skin" };
 static const int CAT_ICONS[CAT_N] = { ICON_SPEAKER, ICON_TARGET, ICON_WINDOW, ICON_DISPLAY, ICON_PALETTE };
@@ -636,6 +706,13 @@ static void settings_category(Ctx *c, int cat, float x, float *py, float cw) {
         y += SH * 3 + 16;
         break;
     case CAT_GAMEPLAY: {
+        card(x, y, cw, RH * 2); yy = y;
+        w_keybind(c, x, yy, cw, "K1", 1, st->key1); yy += RH; sep(x, yy, cw);
+        w_keybind(c, x, yy, cw, "K2", 2, st->key2);
+        y += RH * 2 + 6;
+        { const char *m = c->kmsg[0] ? c->kmsg : c->capture ? "Waiting for a key. Press Esc to cancel." : "Click a key to change it. Mouse buttons always hit as well.";
+          gfx_text(m, x + 16, y, 12, 0, c->kmsg_err ? C_RED : C_LABEL2, cw - 32, A_LEFT); }
+        y += 34;
         int soft = st->assist != 1 && st->assist != 0;
         float gh = SH * 4 + RH * 3 + GH * 2 + (soft ? SH : 0);   /* dim, blur, cursor size, input delay (+ soft radius) */
         card(x, y, cw, gh); yy = y;
@@ -731,7 +808,9 @@ static void draw_settings(Ctx *c, int W, int H) {
     if (in.wheel) c->sscroll -= in.wheel * 60;
     c->sscroll = clampf(c->sscroll, 0, fmaxf(0, c->scontent - (H - vy0)));
     float y = vy0 + 8 - c->sscroll, top = y;
+    int cap_before = c->capture; c->kb_hit = 0;
     settings_category(c, c->cat, cx0, &y, cw);
+    if (cap_before && c->capture == cap_before && in.pressed && !c->kb_hit) { c->capture = 0; c->kmsg[0] = 0; c->kmsg_err = 0; } /* click elsewhere cancels */
     gfx_text("Saved automatically to settings.ini", cx0 + 16, y + 4, 12, 0, C_LABEL2, cw - 32, A_LEFT);
     y += 40;
     c->scontent = y - top + 24;
@@ -839,7 +918,11 @@ int menu_run(SDL_Window *win, SDL_Renderer *ren, Settings *st,
               else if (!strcmp(tok, "f2")) kc = SDLK_F2; else if (!strcmp(tok, "bs")) kc = SDLK_BACKSPACE;
               else if (!strcmp(tok, "enter")) kc = SDLK_RETURN; else if (!strcmp(tok, "home")) kc = SDLK_HOME;
               else if (!strcmp(tok, "f1")) kc = SDLK_F1; else if (!strcmp(tok, "f3")) kc = SDLK_F3; else if (!strcmp(tok, "esc")) kc = SDLK_ESCAPE;
-              if (kc) { ev.type = SDL_KEYDOWN; ev.key.keysym.sym = kc; SDL_PushEvent(&ev); }
+              if (kc) { ev.type = SDL_KEYDOWN; ev.key.keysym.sym = kc; ev.key.keysym.scancode = SDL_GetScancodeFromKey(kc); SDL_PushEvent(&ev); }
+              else if (!strncmp(tok, "key:", 4) || !strncmp(tok, "keyr:", 5) || !strncmp(tok, "keyup:", 6)) { /* raw scancode: key:29, keyr:29 (auto-repeat), keyup:29 */
+                  int up = tok[3] == 'u', rp = tok[3] == 'r', sc = atoi(strchr(tok, ':') + 1);
+                  ev.type = up ? SDL_KEYUP : SDL_KEYDOWN; ev.key.repeat = rp; ev.key.keysym.scancode = (SDL_Scancode)sc; ev.key.keysym.sym = SDL_GetKeyFromScancode((SDL_Scancode)sc); SDL_PushEvent(&ev);
+              }
               else if (!strncmp(tok, "t:", 2)) { ev.type = SDL_TEXTINPUT; snprintf(ev.text.text, sizeof ev.text.text, "%s", tok + 2); SDL_PushEvent(&ev); }
               else if (!strncmp(tok, "click:", 6) || !strncmp(tok, "dclick:", 7)) {
                   int dbl = tok[0] == 'd', cx = 0, cy = 0; sscanf(tok + (dbl ? 7 : 6), "%d:%d", &cx, &cy);
@@ -853,10 +936,16 @@ int menu_run(SDL_Window *win, SDL_Renderer *ren, Settings *st,
         }
 #endif
 in.pressed = 0; in.wheel = 0; in.idc = 0; c.dbl = 0; c.th_loads = 0;
+        if (c.capture && (c.screen != 1 || c.cat != CAT_GAMEPLAY || c.mods_open)) c.capture = 0;   /* the panel closed or changed under the capture */
         SDL_Event e;
         int have = SDL_WaitEventTimeout(&e, 16);
         while (have) {
-            if (e.type == SDL_QUIT) { c.running = 0; c.result = 0; }
+            if (c.swallow && (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && (int)e.key.keysym.scancode == c.swallow) {
+                if (e.type == SDL_KEYUP) c.swallow = 0;  /* the key that ended a capture (and its auto-repeat) acts on nothing until released */
+            } else if (c.capture && (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP || e.type == SDL_TEXTINPUT)) {
+                if (e.type == SDL_KEYDOWN && !e.key.repeat) capture_key(&c, e.key.keysym.scancode);  /* every key event belongs to the capture */
+            } else if (c.capture && e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) { c.capture = 0; c.kmsg[0] = 0; c.kmsg_err = 0; }
+            else if (e.type == SDL_QUIT) { c.running = 0; c.result = 0; }
             else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                 in.pressed = 1; in.down = 1; if (e.button.clicks >= 2) c.dbl = 1;
             } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) in.down = 0;

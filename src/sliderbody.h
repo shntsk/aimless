@@ -25,4 +25,9 @@ void sliderbody_colour(float p, const unsigned char accent[3], const unsigned ch
 void sliderbody_render(unsigned char *rgba, int w, int h, const float *pts, int n, float radius,
                        const unsigned char accent[3], const unsigned char border[3]);
 
+/* Same image as sliderbody_render, produced one band at a time: rows [ybeg, yend) are cleared and drawn, the rest of rgba
+ * is untouched. Calling it for consecutive bands covering 0..h gives exactly the bytes of one full render. */
+void sliderbody_render_rows(unsigned char *rgba, int w, int h, const float *pts, int n, float radius,
+                            const unsigned char accent[3], const unsigned char border[3], int ybeg, int yend);
+
 #endif

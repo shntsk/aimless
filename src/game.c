@@ -3,6 +3,9 @@
 #include "audio.h"
 #include "beatmap.h"
 #include "font.h"
+#include "keybind.h"
+#include "paths.h"
+#include "plat.h"
 #include <SDL_image.h>
 #include "skin.h"
 #include "circlegeom.h"
@@ -16,6 +19,7 @@
 
 #define LEADIN 1500.0
 #define AUDIO_LAT_MS 6.0   /* ~half an audio buffer: Mix_GetMusicPosition is the decoded, not the heard, position */
+#define CLK_TAU_MS   550.0 /* time constant of the clock steering below (= the old "3 % per frame" at 60 fps) */
 
 static void draw_tex(SDL_Renderer *ren, Tex *t, float cx, float cy, float w, float h, int alpha) {
     if (!t->t) return;
@@ -118,65 +122,117 @@ static void slider_pos(const Obj *o, double t, float *x, float *y) {
     *y = o->path[i0*2+1] + (o->path[i0*2+3] - o->path[i0*2+1]) * fr;
 }
 
-/* cached slider body textures: the CPU rasteriser is exact but too heavy to run every frame */
+/* cached slider body textures: the CPU rasteriser is exact but too heavy to run every frame, and too slow
+ * (12-50 ms for a long slider, see sliderbody_render) to run inside the frame where the slider first shows up: the
+ * window would not poll input or move the cursor for that long. So body_prepare() builds the bodies of the upcoming
+ * sliders a few rows at a time, with a small time budget per frame, and body_draw() only builds on the spot what
+ * was not ready in time (new window size, seek, very dense maps), like before. */
 #define N_BODY 24
+#define BODY_BAND 16         /* rows rasterised between two looks at the clock while building ahead */
+#define BODY_BUDGET_MS 3.0   /* per frame */
+#define BODY_LOOKAHEAD 1000.0 /* start building this long before a slider starts fading in */
+#define BODY_AHEAD_MAX 12    /* sliders considered per frame (the cache has N_BODY slots) */
 typedef struct {
     const Obj *o; SDL_Texture *tex; int x0, y0, w, h;
     float s, ox, oy, r; Uint8 acc[3], bor[3]; unsigned used;
+    unsigned char *px; float *pts; int rows;   /* still being rasterised (tex == NULL): rows of h done so far */
 } BodyCache;
 static BodyCache body_cache[N_BODY];
 static unsigned body_tick;
+static unsigned body_sync_n, body_ahead_n;   /* diagnostics (AIMLESS_PERF): built on the spot / built ahead of time */
+static double body_sync_ms, body_sync_max;
 
-static void body_release(BodyCache *b) { if (b->tex) SDL_DestroyTexture(b->tex); memset(b, 0, sizeof *b); }
+static void body_release(BodyCache *b) { if (b->tex) SDL_DestroyTexture(b->tex); free(b->px); free(b->pts); memset(b, 0, sizeof *b); }
 static void body_release_all(void) { for (int i = 0; i < N_BODY; i++) body_release(&body_cache[i]); body_tick = 0; }
 static void body_release_obj(const Obj *o) { for (int i = 0; i < N_BODY; i++) if (body_cache[i].o == o) body_release(&body_cache[i]); }
 
-static void body_draw(SDL_Renderer *ren, const Obj *o, float s, float ox, float oy, float r,
-                      const Uint8 *acc, const Uint8 *bor, int alpha) {
+/* The cache entry holding o's finished body texture for these parameters, or NULL while it is not ready.
+ * deadline == 0 builds it completely now; otherwise it works until SDL_GetPerformanceCounter() reaches deadline and
+ * the next call carries on from the same row. */
+static BodyCache *body_build(SDL_Renderer *ren, const Obj *o, float s, float ox, float oy, float r,
+                             const Uint8 *acc, const Uint8 *bor, Uint64 deadline) {
     BodyCache *b = NULL;
     for (int i = 0; i < N_BODY && !b; i++) if (body_cache[i].o == o) b = &body_cache[i];
     for (int i = 0; i < N_BODY && !b; i++) if (!body_cache[i].o) b = &body_cache[i];
     if (!b) { b = &body_cache[0]; for (int i = 1; i < N_BODY; i++) if (body_cache[i].used < b->used) b = &body_cache[i]; }
-    if (b->o == o && b->tex && b->s == s && b->ox == ox && b->oy == oy && b->r == r &&
-        !memcmp(b->acc, acc, 3) && !memcmp(b->bor, bor, 3)) goto draw;
-    body_release(b);
+    int same = b->o == o && (b->tex || b->px) && b->s == s && b->ox == ox && b->oy == oy && b->r == r &&
+               !memcmp(b->acc, acc, 3) && !memcmp(b->bor, bor, 3);
+    if (same && b->tex) { b->used = ++body_tick; return b; }
+    if (!same) {
+        body_release(b);
 
-    /* bounding box of the path (+ the radius), clipped to the window so a huge slider cannot exceed the texture limit */
-    float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
-    for (int i = 0; i < o->npath; i++) {
-        float x = ox + o->path[i*2] * s, y = oy + o->path[i*2+1] * s;
-        if (x < minx) minx = x;
-        if (x > maxx) maxx = x;
-        if (y < miny) miny = y;
-        if (y > maxy) maxy = y;
+        /* bounding box of the path (+ the radius), clipped to the window so a huge slider cannot exceed the texture limit */
+        float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
+        for (int i = 0; i < o->npath; i++) {
+            float x = ox + o->path[i*2] * s, y = oy + o->path[i*2+1] * s;
+            if (x < minx) minx = x;
+            if (x > maxx) maxx = x;
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+        }
+        int ow = 0, oh = 0; SDL_GetRendererOutputSize(ren, &ow, &oh);
+        int x0 = (int)floorf(minx - r) - 1, y0 = (int)floorf(miny - r) - 1;
+        int x1 = (int)ceilf(maxx + r) + 1, y1 = (int)ceilf(maxy + r) + 1;
+        if (ow > 0) { if (x0 < -(int)r - 1) x0 = -(int)r - 1; if (x1 > ow + (int)r + 1) x1 = ow + (int)r + 1; }
+        if (oh > 0) { if (y0 < -(int)r - 1) y0 = -(int)r - 1; if (y1 > oh + (int)r + 1) y1 = oh + (int)r + 1; }
+        int w = x1 - x0, h = y1 - y0;
+        if (w < 1 || h < 1 || w > 8192 || h > 8192) return NULL;
+        unsigned char *px = malloc((size_t)w * h * 4);
+        float *pts = malloc((size_t)o->npath * 2 * sizeof(float));
+        if (!px || !pts) { free(px); free(pts); return NULL; }
+        for (int i = 0; i < o->npath; i++) { pts[i*2] = ox + o->path[i*2] * s - x0; pts[i*2+1] = oy + o->path[i*2+1] * s - y0; }
+        b->o = o; b->px = px; b->pts = pts; b->rows = 0;
+        b->x0 = x0; b->y0 = y0; b->w = w; b->h = h;
+        b->s = s; b->ox = ox; b->oy = oy; b->r = r; memcpy(b->acc, acc, 3); memcpy(b->bor, bor, 3);
     }
-    int ow = 0, oh = 0; SDL_GetRendererOutputSize(ren, &ow, &oh);
-    int x0 = (int)floorf(minx - r) - 1, y0 = (int)floorf(miny - r) - 1;
-    int x1 = (int)ceilf(maxx + r) + 1, y1 = (int)ceilf(maxy + r) + 1;
-    if (ow > 0) { if (x0 < -(int)r - 1) x0 = -(int)r - 1; if (x1 > ow + (int)r + 1) x1 = ow + (int)r + 1; }
-    if (oh > 0) { if (y0 < -(int)r - 1) y0 = -(int)r - 1; if (y1 > oh + (int)r + 1) y1 = oh + (int)r + 1; }
-    int w = x1 - x0, h = y1 - y0;
-    if (w < 1 || h < 1 || w > 8192 || h > 8192) return;
-    unsigned char *px = malloc((size_t)w * h * 4);
-    float *pts = malloc((size_t)o->npath * 2 * sizeof(float));
-    if (!px || !pts) { free(px); free(pts); return; }
-    for (int i = 0; i < o->npath; i++) { pts[i*2] = ox + o->path[i*2] * s - x0; pts[i*2+1] = oy + o->path[i*2+1] * s - y0; }
-    sliderbody_render(px, w, h, pts, o->npath, r, acc, bor);
-    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+    b->used = ++body_tick;
+
+    Uint64 c0 = SDL_GetPerformanceCounter();
+    while (b->rows < b->h) {
+        if (deadline && SDL_GetPerformanceCounter() >= deadline) return NULL;
+        int y1 = deadline ? b->rows + BODY_BAND : b->h;
+        if (y1 > b->h) y1 = b->h;
+        sliderbody_render_rows(b->px, b->w, b->h, b->pts, o->npath, r, acc, bor, b->rows, y1);
+        b->rows = y1;
+    }
+    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, b->w, b->h);
     if (tex) {
-        SDL_UpdateTexture(tex, NULL, px, w * 4);
+        SDL_UpdateTexture(tex, NULL, b->px, b->w * 4);
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
         SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
     }
-    free(px); free(pts);
-    if (!tex) return;
-    b->o = o; b->tex = tex; b->x0 = x0; b->y0 = y0; b->w = w; b->h = h;
-    b->s = s; b->ox = ox; b->oy = oy; b->r = r; memcpy(b->acc, acc, 3); memcpy(b->bor, bor, 3);
-draw:
-    b->used = ++body_tick;
+    free(b->px); free(b->pts); b->px = NULL; b->pts = NULL;
+    if (!tex) { body_release(b); return NULL; }
+    b->tex = tex;
+    if (!deadline) { /* a slider that is on screen had to wait for this */
+        double ms = (double)(SDL_GetPerformanceCounter() - c0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+        body_sync_n++; body_sync_ms += ms; if (ms > body_sync_max) body_sync_max = ms;
+    } else body_ahead_n++;
+    return b;
+}
+
+static void body_draw(SDL_Renderer *ren, const Obj *o, float s, float ox, float oy, float r,
+                      const Uint8 *acc, const Uint8 *bor, int alpha) {
+    BodyCache *b = body_build(ren, o, s, ox, oy, r, acc, bor, 0);
+    if (!b) return;
     SDL_SetTextureAlphaMod(b->tex, alpha);
     SDL_FRect d = { (float)b->x0, (float)b->y0, (float)b->w, (float)b->h };
     SDL_RenderCopyF(ren, b->tex, NULL, &d);
+}
+
+/* Spend up to `deadline` building the bodies of the sliders that are about to appear. Same parameters as
+ * draw_slider() uses, so what is built here is exactly what gets drawn. */
+static void body_prepare(SDL_Renderer *ren, const Beatmap *bm, int first, double t, float preempt, const Skin *sk,
+                         float s, float ox, float oy, float rad, Uint64 deadline) {
+    float r = rad * 2 * s * 1.05f * 0.5f;
+    for (int i = first, seen = 0; i < bm->n && seen < BODY_AHEAD_MAX; i++) {
+        const Obj *o = &bm->objs[i];
+        if (o->time - preempt - BODY_LOOKAHEAD > t) break;
+        if (!o->type || o->done) continue;
+        seen++;
+        const Uint8 *trk = sk->has_track ? sk->slider_track : sk->combo[o->color % sk->n_combo];
+        if (!body_build(ren, o, s, ox, oy, r, trk, sk->slider_border, deadline)) return;   /* budget spent */
+    }
 }
 
 /* body, ticks, end circle, reverse arrows, ball + follow circle, final judgement. The head circle and the
@@ -252,6 +308,42 @@ static void draw_slider(SDL_Renderer *ren, Skin *sk, Obj *o, double t, float s, 
     }
 }
 
+/* Optional timing diagnostics, off unless AIMLESS_PERF is set (see README). Fixed 1 ms bins, nothing is logged while playing:
+ * one summary goes to stderr and to <data dir>/perf.log when the map ends. */
+typedef struct { unsigned bin[64]; unsigned n; double sum, max; } Hist;
+static void hist_add(Hist *h, double v) {
+    int i = v < 0 ? 0 : v > 63 ? 63 : (int)v;
+    h->bin[i]++; h->n++; h->sum += v; if (v > h->max) h->max = v;
+}
+static double hist_pct(const Hist *h, double q) {   /* upper edge (ms) of the bin that holds the q-quantile */
+    unsigned want = (unsigned)ceil(q * h->n), acc = 0;
+    for (int i = 0; i < 64; i++) { acc += h->bin[i]; if (acc >= want) return i + 1; }
+    return 64;
+}
+static unsigned hist_over(const Hist *h, int ms) { unsigned c = 0; for (int i = ms; i < 64; i++) c += h->bin[i]; return c; }
+static void perf_print(FILE *f, const char *map, SDL_Renderer *ren, const Settings *st, const Hist *frame, const Hist *present,
+                       const Hist *lag, double secs) {
+    SDL_RendererInfo ri; memset(&ri, 0, sizeof ri); SDL_GetRendererInfo(ren, &ri);
+    SDL_version v; SDL_GetVersion(&v);
+    int mf = 0, mc = 0; Uint16 mfmt = 0; Mix_QuerySpec(&mf, &mfmt, &mc);
+    const char *vd = SDL_GetCurrentVideoDriver(), *ad = SDL_GetCurrentAudioDriver();
+    fprintf(f, "aimless perf | %s\n", map);
+    fprintf(f, "  SDL %d.%d.%d | video %s | renderer %s%s | audio %s %d Hz | vsync=%d fps_limit=%d\n", v.major, v.minor, v.patch,
+            vd ? vd : "?", ri.name ? ri.name : "?", (ri.flags & SDL_RENDERER_PRESENTVSYNC) ? " (vsync on)" : "",
+            ad ? ad : "?", mf, st->vsync, st->fps_limit);
+    if (frame->n)
+        fprintf(f, "  frames %u in %.1f s (%.0f fps) | interval between input polls, ms: avg %.2f p99 <=%.0f max %.1f | >16.7: %u  >33: %u\n",
+                frame->n, secs, frame->n / (secs > 0 ? secs : 1), frame->sum / frame->n, hist_pct(frame, 0.99), frame->max,
+                hist_over(frame, 17), hist_over(frame, 34));
+    if (present->n)
+        fprintf(f, "  SDL_RenderPresent, ms: avg %.2f p99 <=%.0f max %.1f\n", present->sum / present->n, hist_pct(present, 0.99), present->max);
+    if (lag->n)
+        fprintf(f, "  clicks %u | SDL queue->frame lag, ms: avg %.2f max %.0f (SDL2 stamps events when it queues them, so time spent in the OS queue is not in this number)\n",
+                lag->n, lag->sum / lag->n, lag->max);
+    fprintf(f, "  slider bodies: %u built ahead of time | %u built while visible (total %.1f ms, worst %.1f ms)\n",
+            body_ahead_n, body_sync_n, body_sync_ms, body_sync_max);
+}
+
 typedef struct { float x, y; double t; } Flash;
 #define N_FL 32
 #define N_ERR 40
@@ -298,6 +390,17 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
     Uint64 next_frame = SDL_GetPerformanceCounter();
     SDL_Color col300 = {80, 200, 255, 255}, col100 = {120, 230, 110, 255}, col50 = {255, 210, 80, 255};
     Uint64 t0 = SDL_GetPerformanceCounter(), freq = SDL_GetPerformanceFrequency();
+    double clk_wall = -1;                 /* wall time of the previous clock correction */
+    int mx = 0, my = 0; Uint32 mbtn = 0;  /* cursor, kept in event order (see the event loop) */
+    SDL_GetMouseState(&mx, &my);
+    /* gameplay keys (scancodes), fixed for the whole map: the event loop only compares two ints, so rebinding costs nothing */
+    int key1 = st->key1, key2 = st->key2;
+    keybind_sanitize(&key1, &key2);
+    const char *pe = getenv("AIMLESS_PERF");
+    int perf = pe && *pe && strcmp(pe, "0");
+    Hist h_frame = {0}, h_present = {0}, h_lag = {0};
+    double perf_prev = -1, perf_start = 0;
+    body_sync_n = body_ahead_n = 0; body_sync_ms = body_sync_max = 0;
 
     while (running) {
         double wall = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / freq - LEADIN;
@@ -310,8 +413,10 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
             double p = Mix_GetMusicPosition(mus);
             if (p >= 0) {
                 double err = p * 1000.0 - AUDIO_LAT_MS - wall;
+                double dt = clk_wall < 0 ? 0 : wall - clk_wall;    /* the filter runs on time, not on frames: at 8000 fps a   */
+                clk_wall = wall;                                   /* per-frame gain would follow the buffer-sized steps      */
                 if (fabs(err - clk) > 150) clk = err;              /* seek / first sync */
-                else clk += (err - clk) * 0.03;                    /* low-pass: position updates in buffer-sized steps */
+                else clk += (err - clk) * (1 - exp(-dt / CLK_TAU_MS)); /* low-pass: position updates in buffer-sized steps */
 #ifdef AIMLESS_DEBUG
                 if (getenv("AIMLESS_CLK") && (fps_n % 200) == 0) fprintf(stderr, "wall %.0f pos %.1f err %.1f clk %.1f\n", wall, p * 1000, err, clk);
 #endif
@@ -321,12 +426,14 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
         double t = wall + clk;
         SDL_GetWindowSize(win, &W, &H);
         float s = H / 480.0f, ox = (W - 512 * s) / 2, oy = (H - 384 * s) / 2 + 8 * s;
-        int mx, my; Uint32 mbtn = SDL_GetMouseState(&mx, &my);
+        if (perf) { double now = wall + LEADIN; if (perf_prev >= 0) hist_add(&h_frame, now - perf_prev); else perf_start = now; perf_prev = now; }
 
 #ifdef AIMLESS_DEBUG /* test hook: perfect-ish autoplay clicks + screenshot (not in release builds) */
         if (getenv("AIMLESS_AUTOHIT") && first < bm.n && !(getenv("AIMLESS_MISS") && first == atoi(getenv("AIMLESS_MISS"))) && t >= bm.objs[first].time + ((first * 37) % 60) - 30) {
             SDL_Event ev; memset(&ev, 0, sizeof ev);
-            ev.type = SDL_MOUSEBUTTONDOWN; ev.button.timestamp = SDL_GetTicks(); ev.button.button = SDL_BUTTON_LEFT;
+            if (getenv("AIMLESS_AUTOKEY")) { /* AIMLESS_AUTOKEY=<scancode>: hit with that key instead of the mouse (tests the configured keys) */
+                ev.type = SDL_KEYDOWN; ev.key.timestamp = SDL_GetTicks(); ev.key.keysym.scancode = (SDL_Scancode)atoi(getenv("AIMLESS_AUTOKEY"));
+            } else { ev.type = SDL_MOUSEBUTTONDOWN; ev.button.timestamp = SDL_GetTicks(); ev.button.button = SDL_BUTTON_LEFT; ev.button.x = mx; ev.button.y = my; }
             SDL_PushEvent(&ev);
         }
 #endif
@@ -336,14 +443,16 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
             if (e.type == SDL_QUIT) { running = 0; quit = 1; }
             else if (e.type == SDL_KEYDOWN && !e.key.repeat) {
                 if (e.key.keysym.sym == SDLK_ESCAPE) running = 0;
-                else if (e.key.keysym.sym == SDLK_z || e.key.keysym.sym == SDLK_x) { click = 1; ts = e.key.timestamp; }
-            } else if (e.type == SDL_MOUSEBUTTONDOWN) { click = 1; ts = e.button.timestamp; }
+                else if (keybind_is_hit(e.key.keysym.scancode, key1, key2)) { click = 1; ts = e.key.timestamp; }
+            } else if (e.type == SDL_MOUSEMOTION) { mx = e.motion.x; my = e.motion.y; }
+            else if (e.type == SDL_MOUSEBUTTONDOWN) { mx = e.button.x; my = e.button.y; click = 1; ts = e.button.timestamp; }
 
             if (click && first < bm.n) {
                 /* judge at the time the input actually happened, not when the frame got to it */
                 double lag = (double)(SDL_GetTicks() - ts);
                 if (lag < 0 || lag > 50) lag = 0;
                 lag_last = (int)lag; lag_sum += lag; lag_n++;
+                if (perf) hist_add(&h_lag, lag);
                 double te = t - lag - st->input_delay;
                 Obj *o = &bm.objs[first];
                 double diff = fabs(te - o->time);
@@ -363,6 +472,10 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
                 }
             }
         }
+        /* The queue is empty here, so SDL's own state is as new as the events above. It used to be read BEFORE the poll,
+         * i.e. as of the previous frame's poll: the cursor, the silent-aim check and the slider follow were a whole frame
+         * (plus the time spent in Present) behind the mouse. A click is judged with the position it came with. */
+        mbtn = SDL_GetMouseState(&mx, &my);
         while (first < bm.n && t > bm.objs[first].time + w50) {
             Obj *o = &bm.objs[first++];
             o->state = 2; o->judge = 0; o->judge_time = (int)t;
@@ -372,7 +485,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
 
         { /* sliders whose head is resolved: follow, ticks, repeats, tail */
             const Uint8 *ks = SDL_GetKeyboardState(NULL);
-            int held = (mbtn & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) || ks[SDL_SCANCODE_Z] || ks[SDL_SCANCODE_X];
+            int held = (mbtn & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) || ks[key1] || ks[key2];
 #ifdef AIMLESS_DEBUG
             if (getenv("AIMLESS_AUTOHIT")) held = 1;
 #endif
@@ -527,8 +640,10 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
             text_blit(ren, &t_lag, 10, hy, 200);
         }
 
+        int cx = mx, cy = my;
+        SDL_PumpEvents(); SDL_GetMouseState(&cx, &cy);   /* what is on screen uses the newest position (events stay queued for the next poll) */
         if (st->cursor_trail) { /* short fading trail, sampled by time so it is fps independent */
-            if (t - tr_last >= 2.5) { tr[tr_i % N_TR] = (Flash){ (float)mx, (float)my, t }; tr_i++; tr_last = t; }
+            if (t - tr_last >= 2.5) { tr[tr_i % N_TR] = (Flash){ (float)cx, (float)cy, t }; tr_i++; tr_last = t; }
             for (int i = 0; i < N_TR; i++) {
                 double age = t - tr[i].t;
                 if (tr[i].t == 0 || age < 0 || age > 140) continue;
@@ -537,7 +652,7 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
             }
         }
         float cs = sk.cursor.w * us * st->cursor_size, ch = sk.cursor.h * us * st->cursor_size;
-        draw_tex(ren, &sk.cursor, mx, my, cs, ch, 255);
+        draw_tex(ren, &sk.cursor, cx, cy, cs, ch, 255);
 #ifdef AIMLESS_DEBUG
         if (getenv("AIMLESS_SHOT") && t >= atof(getenv("AIMLESS_SHOT_T") ? getenv("AIMLESS_SHOT_T") : "3300")) {
             SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
@@ -545,7 +660,11 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
             IMG_SavePNG(ss, getenv("AIMLESS_SHOT")); SDL_FreeSurface(ss); running = 0;
         }
 #endif
+        Uint64 pc0 = perf ? SDL_GetPerformanceCounter() : 0;
         SDL_RenderPresent(ren);
+        if (perf) hist_add(&h_present, (double)(SDL_GetPerformanceCounter() - pc0) * 1000.0 / (double)freq);
+        /* idle time after the frame: build the next slider bodies a few rows at a time (see body_prepare) */
+        body_prepare(ren, &bm, first, t, preempt, &sk, s, ox, oy, rad, SDL_GetPerformanceCounter() + (Uint64)(freq * (BODY_BUDGET_MS / 1000.0)));
         if (!st->vsync && st->fps_limit > 0) { /* frame limiter: sleep most of the wait, spin the last bit */
             Uint64 period = freq / st->fps_limit; next_frame += period;
             Uint64 now = SDL_GetPerformanceCounter();
@@ -563,6 +682,13 @@ int game_play(SDL_Window *win, SDL_Renderer *ren, const char *map, const char *s
     snprintf(st->status, sizeof st->status, "last: %d pts | combo %d | %d/%d/%d/%dx | %.2f%%",
              (int)score, maxcombo, hits[0], hits[1], hits[2], hits[3], acc);
     printf("%s\n", st->status);
+    if (perf) {
+        double secs = (perf_prev - perf_start) / 1000.0;
+        perf_print(stderr, map, ren, st, &h_frame, &h_present, &h_lag, secs);
+        char lp[700]; snprintf(lp, sizeof lp, "%s/perf.log", data_dir());
+        FILE *lf = plat_fopen(lp, "a");
+        if (lf) { perf_print(lf, map, ren, st, &h_frame, &h_present, &h_lag, secs); fclose(lf); }
+    }
 
 #ifdef AIMLESS_DEBUG
     if (getenv("AIMLESS_CLK")) fprintf(stderr, "clock offset vs audio: %.1f ms\n", clk);

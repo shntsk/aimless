@@ -33,16 +33,22 @@ void sliderbody_colour(float p, const unsigned char accent[3], const unsigned ch
 
 #define LUT_N 1024
 
-void sliderbody_render(unsigned char *rgba, int w, int h, const float *pts, int n, float radius,
-                       const unsigned char accent[3], const unsigned char border[3]) {
-    for (long i = 0; i < (long)w * h * 4; i++) rgba[i] = 0;
-    if (n < 1 || radius <= 0 || w <= 0 || h <= 0) return;
+/* Rows [ybeg, yend) of the image, bit-identical to what a full render puts there: every pixel only depends on its own
+ * distance to the centre line. Lets the caller spread one rasterisation over several frames (see game.c). */
+void sliderbody_render_rows(unsigned char *rgba, int w, int h, const float *pts, int n, float radius,
+                            const unsigned char accent[3], const unsigned char border[3], int ybeg, int yend) {
+    if (ybeg < 0) ybeg = 0;
+    if (yend > h) yend = h;
+    if (w <= 0 || ybeg >= yend) return;
+    int bh = yend - ybeg;
+    for (long i = (long)ybeg * w * 4; i < (long)yend * w * 4; i++) rgba[i] = 0;
+    if (n < 1 || radius <= 0) return;
 
-    /* squared distance to the centre line, per pixel centre */
-    float *d2 = malloc((size_t)w * h * sizeof(float));
+    /* squared distance to the centre line, per pixel centre (this band only) */
+    float *d2 = malloc((size_t)w * bh * sizeof(float));
     if (!d2) return;
     float r2 = radius * radius;
-    for (long i = 0; i < (long)w * h; i++) d2[i] = r2;
+    for (long i = 0; i < (long)w * bh; i++) d2[i] = r2;
 
     for (int k = 0; k < (n > 1 ? n - 1 : 1); k++) {
         float ax = pts[k*2], ay = pts[k*2+1];
@@ -51,12 +57,12 @@ void sliderbody_render(unsigned char *rgba, int w, int h, const float *pts, int 
         int x0 = (int)floorf(fminf(ax, bx) - radius), x1 = (int)ceilf(fmaxf(ax, bx) + radius);
         int y0 = (int)floorf(fminf(ay, by) - radius), y1 = (int)ceilf(fmaxf(ay, by) + radius);
         if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
+        if (y0 < ybeg) y0 = ybeg;
         if (x1 > w) x1 = w;
-        if (y1 > h) y1 = h;
+        if (y1 > yend) y1 = yend;
         for (int y = y0; y < y1; y++) {
             float py = y + 0.5f - ay;
-            float *row = d2 + (long)y * w;
+            float *row = d2 + (long)(y - ybeg) * w;
             for (int x = x0; x < x1; x++) {
                 float px = x + 0.5f - ax;
                 float u = ll > 0 ? (px * dx + py * dy) / ll : 0;
@@ -75,12 +81,18 @@ void sliderbody_render(unsigned char *rgba, int w, int h, const float *pts, int 
     }
     /* the table is rebuilt per call (cheap) so the static only avoids a large stack array */
 
-    for (long i = 0; i < (long)w * h; i++) {
+    unsigned char *out = rgba + (long)ybeg * w * 4;
+    for (long i = 0; i < (long)w * bh; i++) {
         if (d2[i] >= r2) continue;
         float p = 1 - sqrtf(d2[i]) / radius;
         float f = p * LUT_N; int i0 = (int)f; if (i0 >= LUT_N) i0 = LUT_N - 1;
         float fr = f - i0;
-        for (int k = 0; k < 4; k++) rgba[i*4+k] = (unsigned char)(lut[i0][k] + (lut[i0+1][k] - lut[i0][k]) * fr + 0.5f);
+        for (int k = 0; k < 4; k++) out[i*4+k] = (unsigned char)(lut[i0][k] + (lut[i0+1][k] - lut[i0][k]) * fr + 0.5f);
     }
     free(d2);
+}
+
+void sliderbody_render(unsigned char *rgba, int w, int h, const float *pts, int n, float radius,
+                       const unsigned char accent[3], const unsigned char border[3]) {
+    sliderbody_render_rows(rgba, w, h, pts, n, radius, accent, border, 0, h);
 }

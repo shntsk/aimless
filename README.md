@@ -18,7 +18,7 @@ Loads **osu! stable skins** (hitcircle, overlay, approach circle, cursor, number
 - Stable skin support: hitcircle, overlay, approach circle, cursor, numbers, HUD digits, hit judgements, `skin.ini` combo colours (`@2x` preferred, procedural fallback)
 - **Hitsounds**: `normal/soft/drum` x `hitnormal/hitwhistle/hitfinish/hitclap` from the beatmap folder, then the skin, then generated sounds; sample sets and volume come from the timing points
 - Soft silent aim by default (click within 2.5 circle radii still hits, cursor drawn where the mouse really is). `Tab` in the menu cycles soft / anywhere / off
-- Input judged at the real event timestamp, not at the next frame
+- Clicks are judged at the frame time minus the delay SDL reports between queueing an event and handling it; the cursor is drawn at the newest mouse position (see *Latency notes*)
 - Uncapped FPS by default; frame limiter, FPS counter and input delay readout in the HUD
 
 ## Song select
@@ -58,13 +58,27 @@ Open **Options** in the song select (or press `F3`): a side panel slides over th
 | Group | Options |
 |---|---|
 | Audio | master, music and effect (hitsound) volume |
-| Gameplay | background dim, background blur, show background, cursor size, cursor trail, hit lighting, playfield border (none / corners / full), silent aim (off / soft / anywhere, soft radius), input delay compensation (-100..100 ms) |
+| Gameplay | **K1 / K2 keys** (default Z / X), background dim, background blur, show background, cursor size, cursor trail, hit lighting, playfield border (none / corners / full), silent aim (off / soft / anywhere, soft radius), input delay compensation (-100..100 ms) |
 | Interface | show score, accuracy, combo, hit error meter, FPS counter, input delay |
 | Display | frame limiter (VSync / 60 / 120 / 240 / 480 / unlimited), fullscreen |
 | Skin | the skin used for the next map |
 
-**Input delay**: with the option on, the HUD shows the measured lag between the real input event and the frame that handled it,
-plus your compensation. Hits are judged at the event timestamp, so frame rate does not add delay.
+**Gameplay keys (K1 / K2)**: *Options -> Gameplay* has two rows, K1 (default `Z`) and K2 (default `X`). Click a row: it turns blue and says
+"Press a key...", and the next key you press becomes the binding (it is saved to `settings.ini` as `key1` / `key2` right away).
+`Esc`, a click anywhere else, closing the panel or switching window cancels and changes nothing. A key already used by the other row is
+refused with a message (the capture stays open, press another key or `Esc`); `Esc`, the Windows/Super key, the lock keys, `PrintScreen`,
+`Pause`, `Menu` and `Power` cannot be used. While a capture is open every key event belongs to it, so the key you press cannot click a
+button, change the category or start a map, and the key (and its auto-repeat) is ignored until you release it. The mouse buttons always hit
+as well. Missing, invalid or equal values in `settings.ini` fall back to `Z` / `X`.
+Bindings are stored as **SDL scancodes** (the physical key position), not keycodes: on AZERTY / QWERTZ / Dvorak the default pair stays on the
+same two keys under your left hand instead of following the letters, and the names on screen follow your layout (the key at the QWERTY `Z`
+position shows as `W` on AZERTY). Gameplay compares the scancode of each key-down with two integers fixed when the map starts, so remapping
+adds no work to the input path.
+
+**Input delay**: with the option on, the HUD shows the lag SDL reports between queueing an input event and the frame that handled
+it, plus your compensation. SDL2 stamps an event when it queues it (not when the OS received it), so this number cannot see time an
+event spent waiting in the OS queue while a frame was still being drawn; it stays near 0 ms. For the real picture use `AIMLESS_PERF`
+(below). Use the compensation setting for a constant offset.
 
 ### Compared with osu!lazer (osu!standard)
 Lazer's global gameplay options (background dim/blur, hit lighting, cursor size, FPS counter) and its osu! ruleset options
@@ -100,7 +114,7 @@ aimless map.osu [skin]               # play a map directly; skin = folder, .osk 
 ```
 Flags: `--no-silent`, `--assist=N` (radii; `0` = anywhere, `1` = normal), `--vsync`, `--songs=DIR`, `--skins=DIR`
 (point those at your osu!stable `Songs`/`Skins` folders to use them without copying).
-Data lives in `~/.local/share/aimless/{Songs,Skins}`. Keys: `Z`/`X`/mouse to hit, `Esc` back/quit.
+Data lives in `~/.local/share/aimless/{Songs,Skins}`. Keys: `K1`/`K2` (default `Z`/`X`, configurable in Options -> Gameplay) or the mouse buttons to hit, `Esc` back/quit.
 
 ## Skins
 - **Import**: drop a `.osk` (or a skin folder) on the song-select window, or `aimless import MySkin.osk`. A `.osk` is extracted into `~/.local/share/aimless/Skins/<name>` through a hidden temp folder, so a broken archive installs nothing; the `.osk` is never modified, an already installed skin is never overwritten (the new one becomes `<name> (2)`), and an archive with a single wrapper folder is flattened. Archives are read by a built-in reader (stored and deflate, UTF-8 names); `unzip` / `bsdtar` (`tar.exe` on Windows) are only used as a fallback for exotic archives.
@@ -109,7 +123,7 @@ Data lives in `~/.local/share/aimless/{Songs,Skins}`. Keys: `Z`/`X`/mouse to hit
 - **skin.ini**: BOM, CRLF, indentation, `//` comments, `[Sections]` and `Key: Value` in any spacing are handled. Read today: `Combo1-8`, `SliderBorder`, `SliderTrackOverride`, `AllowSliderBallTint`, `Name`, `HitCirclePrefix` / `HitCircleOverlap` (circle numbers, below); `ScorePrefix`, `ComboPrefix` and their overlaps are parsed but not used yet.
 - **Circle numbers**: digit `d` is the image `<HitCirclePrefix>-d` (default prefix `default`; sub-folders such as `fonts/hit/score` work, `@2x` preferred, case ignored). A digit whose file is missing falls back to `default-d`, then to a generated font digit. Each digit keeps its own width; `HitCircleOverlap` (logical px, may be negative) is how far the next digit is pulled back over the previous one. Image digits are scaled with the same factor as the circle sprites; generated digits keep the old fixed size.
 - `AIMLESS_SKINLOG=1` prints every skin image that gets loaded, `AIMLESS_SFXLOG=1` every sample.
-- `make test` runs the SDL-free tests (parser, lookup, import); `make test OSK=/path/skin.osk` adds a real skin.
+- `make test` runs the SDL-free tests (parser, lookup, import, mods, key-binding rules and their `settings.ini` round trip; the key-capture UI and the key handling in gameplay need SDL and are not part of it); `make test OSK=/path/skin.osk` adds a real skin.
 
 ## Releases
 Push a tag like `v0.1.0` and the `release` workflow builds on Arch Linux and attaches `aimless-v0.1.0-x86_64-arch.tar.gz` (+ sha256) to a GitHub Release.
@@ -117,6 +131,22 @@ Push a tag like `v0.1.0` and the `release` workflow builds on Arch Linux and att
 ## Performance notes
 Plain SDL2 renderer, no per-frame allocations, only the objects on screen are drawn, no shaders or post-processing.
 If the FPS is low on an iGPU, run with `SDL_RENDER_DRIVER=opengl` or `SDL_RENDER_DRIVER=opengles2` and compare.
+
+### Latency notes
+Input is polled once per frame on the main thread, so a click waits in the OS queue until the current frame is finished
+(drawing, `SDL_RenderPresent`, anything else the frame does). What the code does about it:
+- the mouse position is read after the events were polled, a click is judged with the position it carried, and the cursor sprite
+  uses the newest position at draw time;
+- slider body textures are rasterised on the CPU (12-50 ms for a long slider at 720p-1440p). They are built a few rows at a time,
+  about 3 ms per frame, for the sliders that are about to appear, instead of all at once in the frame where the slider shows up;
+- the game clock follows the audio position with a time constant, not a per-frame gain, so the frame rate does not change it.
+
+### Timing diagnostics (`AIMLESS_PERF`)
+Set `AIMLESS_PERF=1` (Windows: `set AIMLESS_PERF=1` in the same console, then run `aimless.exe`) to get a summary when a map ends,
+on stderr and appended to `perf.log` in the data folder. Nothing is printed during play. It reports the interval between input polls
+(a click can wait that long before it is seen), time spent in `SDL_RenderPresent`, the SDL queue-to-frame lag of clicks, how many slider
+bodies had to be built while visible, and the SDL version, video / audio driver, renderer (e.g. direct3d, opengl) and vsync state.
+Please attach it when reporting lag.
 
 ## Layout
 ```
@@ -134,6 +164,7 @@ src/skinini.c   skin.ini reader (no SDL)
 tests/          SDL-free tests for the above (make test)
 src/audio.c     hitsounds
 src/settings.c  settings.ini load/save
+src/keybind.c   K1/K2 validation, conflict rules, fallback to Z/X (no SDL)
 src/font.c      TTF helpers + cached text
 ```
 

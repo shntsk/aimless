@@ -1,5 +1,6 @@
 /* settings.ini: simple `key = value` file in the data dir. Unknown keys are ignored. */
 #include "settings.h"
+#include "keybind.h"
 #include "paths.h"
 #include "plat.h"
 #include <stdio.h>
@@ -17,6 +18,7 @@ void settings_defaults(Settings *s) {
     memcpy(songs, s->songs_extra, sizeof songs); memcpy(skins, s->skins_extra, sizeof skins); memcpy(st, s->status, sizeof st);
     memset(s, 0, sizeof *s);
     s->assist = 2.5f;
+    s->key1 = KB_SC_Z; s->key2 = KB_SC_X;
     s->bg_dim = 70; s->show_bg = 1;
     s->cursor_size = 1.0f;
     s->master_vol = 80; s->music_vol = 80; s->sfx_vol = 100;
@@ -41,6 +43,7 @@ void settings_clamp(Settings *s) {
     if (s->cursor_size < 0.3f) s->cursor_size = 0.3f;
     if (s->cursor_size > 3.0f) s->cursor_size = 3.0f;
     if (s->assist < 0) s->assist = 0;
+    keybind_sanitize(&s->key1, &s->key2);
 }
 
 static char *trim(char *s) {
@@ -61,6 +64,8 @@ int settings_load(Settings *s) {
         char *k = trim(line), *v = trim(eq + 1);
         if (!strcmp(k, "assist")) s->assist = (float)atof(v);
         else if (!strcmp(k, "input_delay")) s->input_delay = atoi(v);
+        else if (!strcmp(k, "key1")) s->key1 = atoi(v);
+        else if (!strcmp(k, "key2")) s->key2 = atoi(v);
         else if (!strcmp(k, "vsync")) s->vsync = atoi(v) != 0;
         else if (!strcmp(k, "bg_dim")) s->bg_dim = atoi(v);
         else if (!strcmp(k, "show_bg")) s->show_bg = atoi(v) != 0;
@@ -99,6 +104,8 @@ void settings_save(const Settings *s) {
         "# aimless settings (edited by the game, safe to edit by hand)\n"
         "assist = %g            # 2.5 soft silent aim, 0 anywhere, 1 normal aim\n"
         "input_delay = %d       # ms; positive = judge your hits earlier (compensates lag)\n"
+        "key1 = %d             # gameplay key K1: SDL scancode (physical key, same on every layout); 29 = Z\n"
+        "key2 = %d             # gameplay key K2: SDL scancode; 27 = X. Missing or invalid values fall back to Z / X\n"
         "vsync = %d\n"
         "fps_limit = %d         # used when vsync = 0: 0 unlimited, 60, 120, 240, 480\n"
         "fullscreen = %d\n"
@@ -124,7 +131,7 @@ void settings_save(const Settings *s) {
         "skin = %s\n"
         "songs_dir = %s\n"
         "skins_dir = %s\n",
-        s->assist, s->input_delay, s->vsync, s->fps_limit, s->fullscreen, s->master_vol, s->bg_blur, s->cursor_trail, s->hit_lighting, s->border, s->show_error_bar, s->bg_dim, s->show_bg, s->cursor_size, s->music_vol, s->sfx_vol,
+        s->assist, s->input_delay, s->key1, s->key2, s->vsync, s->fps_limit, s->fullscreen, s->master_vol, s->bg_blur, s->cursor_trail, s->hit_lighting, s->border, s->show_error_bar, s->bg_dim, s->show_bg, s->cursor_size, s->music_vol, s->sfx_vol,
         s->show_combo, s->show_score, s->show_acc, s->show_fps, s->show_input_delay, s->sort_mode, s->group_mode, s->last_map, s->skin, s->songs_extra, s->skins_extra);
     fclose(f);
 }
