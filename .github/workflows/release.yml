@@ -30,18 +30,76 @@ jobs:
           name: aimless-arch
           path: aimless-*.tar.gz*
 
+  build-windows:
+    # Windows x86_64 (MSYS2 / MinGW-w64): aimless.exe plus the SDL2 DLLs it needs, so it runs without MSYS2 installed.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_image
+            mingw-w64-x86_64-SDL2_mixer
+            mingw-w64-x86_64-SDL2_ttf
+      - name: Build and test
+        env:
+          AIMLESS_TEST_REQUIRE_ZIP: "1"
+        run: |
+          make CC=gcc CFLAGS="-O2 -Wall"
+          make CC=gcc CFLAGS="-O2 -Wall" test
+      - name: Package
+        run: |
+          VER="${GITHUB_REF_NAME:-dev}"
+          DIR="aimless-$VER-x86_64-windows"
+          mkdir -p "$DIR"
+          strip aimless.exe
+          cp aimless.exe README.md LICENSE "$DIR/"
+          # every non-system DLL the exe links against (found by ldd), copied next to it
+          ldd aimless.exe | awk '/\/mingw64\/bin\//{print $3}' | sort -u | while read -r dll; do cp "$dll" "$DIR/"; done
+          # codec libraries SDL2_mixer / SDL2_image may load at run time instead of linking (copied only if present)
+          for pat in libvorbisfile-*.dll libvorbis-*.dll libogg-*.dll libopusfile-*.dll libopus-*.dll libFLAC*.dll libmpg123-*.dll libmodplug-*.dll libwavpack-*.dll libxmp*.dll libwebp*.dll libtiff-*.dll libjpeg-*.dll libpng16-*.dll; do
+            for f in /mingw64/bin/$pat; do if [ -f "$f" ]; then cp -n "$f" "$DIR/"; fi; done
+          done
+          ls -l "$DIR"
+          zip -qr "$DIR.zip" "$DIR"
+          sha256sum "$DIR.zip" > "$DIR.zip.sha256"
+      - name: Check the package starts without MSYS2 on PATH (DLLs complete)
+        run: |
+          DIR="aimless-${GITHUB_REF_NAME:-dev}-x86_64-windows"
+          PATH="/c/Windows/System32:/c/Windows" "./$DIR/aimless.exe" import does-not-exist.osz
+          echo "exit code: $?"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aimless-windows
+          path: aimless-*.zip*
+
   publish:
-    needs: build
+    needs: [build, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: aimless-arch
+          pattern: aimless-*
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: aimless-*.tar.gz*
+          files: |
+            aimless-*.tar.gz*
+            aimless-*.zip*
           generate_release_notes: true
           body: |
-            Vibe-coded fan project, not affiliated with osu! / ppy. Built on Arch Linux (x86_64).
-            Install runtime deps: `sudo pacman -S sdl2 sdl2_image sdl2_mixer sdl2_ttf unzip fontconfig`
+            Vibe-coded fan project, not affiliated with osu! / ppy. Built on Arch Linux (x86_64) and Windows (x86_64, MSYS2 / MinGW-w64).
+            Arch: install runtime deps `sudo pacman -S sdl2 sdl2_image sdl2_mixer sdl2_ttf unzip fontconfig`, then extract the `.tar.gz`.
+            Windows: extract the `.zip` and run `aimless.exe` (the SDL2 DLLs are included). The Windows build is new and has only been compiled and unit-tested on CI.
